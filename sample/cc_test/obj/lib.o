@@ -1,0 +1,4 @@
+--FILE src/lib.c
+global function number(): integer
+   return (4);
+end

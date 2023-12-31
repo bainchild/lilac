@@ -1,12 +1,24 @@
-use std::{backtrace, fs::File, io::Write, ops::Deref, os::fd::AsFd, sync::Arc, time::SystemTime};
+use std::{
+    backtrace,
+    ffi::{OsStr, OsString},
+    fs::File,
+    io::Write,
+    ops::Deref,
+    os::fd::AsFd,
+    process::Command,
+    sync::Arc,
+    thread::spawn,
+    time::SystemTime,
+};
 
 use lang_c::{
     ast::{
         self, ArraySize, BinaryOperator, BlockItem, CastExpression, CompoundLiteral, Constant,
         DeclarationSpecifier, DeclaratorKind, DerivedDeclarator, Ellipsis, Expression, FloatBase,
         ForInitializer, FunctionSpecifier, GenericSelection, Identifier, Initializer, IntegerBase,
-        Label, MemberOperator, PointerQualifier, SpecifierQualifier, Statement, StructDeclaration,
-        StructKind, StructType, TypeOf, TypeQualifier, TypeSpecifier,
+        Label, MemberOperator, PointerQualifier, SpecifierQualifier, Statement,
+        StorageClassSpecifier, StructDeclaration, StructKind, StructType, TypeOf, TypeQualifier,
+        TypeSpecifier,
     },
     driver::{parse, Config},
     span::Node,
@@ -44,6 +56,9 @@ impl<T: IntoLua> IntoLua for Node<T> {
 //     }
 // }
 fn get_practical_type(s: Node<TypeSpecifier>) -> String {
+    // if s.into_lua().trim().is_empty() {
+    //     return "AAAAAAAAAAAAAAAAAAAAAA".to_string();
+    // }
     let vartype: String;
     // this feels stupid. like... there should be a better solution to this
     // but I haven't found it yet
@@ -188,7 +203,7 @@ impl IntoLua for ast::CompoundLiteral {
 }
 impl IntoLua for ast::SizeOfTy {
     fn into_lua(&self) -> String {
-        "____C.SizeOfType(".to_string() + &self.0.into_lua() + ")"
+        "____C.SizeOfType('".to_string() + &self.0.into_lua() + "')"
     }
 }
 impl IntoLua for ast::SizeOfVal {
@@ -552,14 +567,24 @@ impl IntoLua for ast::Expression {
             // todo
             Expression::Identifier(b) => b.into_lua(),
             Expression::Constant(b) => b.into_lua(),
-            Expression::StringLiteral(b) => b.node.join("..").into_lua(),
+            Expression::StringLiteral(b) => {
+                "____C.Str(".to_owned() + &b.node.join("..").into_lua() + ")"
+            }
             Expression::GenericSelection(s) => s.into_lua(),
             Expression::Member(m) => m.into_lua(),
             Expression::Call(b) => b.into_lua(),
             Expression::CompoundLiteral(c) => c.into_lua(),
             Expression::SizeOfTy(t) => t.into_lua(),
             Expression::SizeOfVal(s) => s.into_lua(),
-            Expression::Comma(_) => "--[[ comma ]]".to_string(),
+            Expression::Comma(comm) => {
+                let mut s = "(function()".to_string();
+                for v in comm.iter().take(comm.len() - 1) {
+                    s = s + &v.into_lua() + ";"
+                }
+                s = s + "return " + &comm.last().unwrap().into_lua();
+                s = s + " end)()";
+                s
+            } // "--[[ comma ]]".to_string(),
             Expression::UnaryOperator(s) => s.into_lua(),
             Expression::Statement(s) => s.into_lua(),
             Expression::Cast(s) => {
@@ -611,14 +636,14 @@ impl IntoLua for ast::WhileStatement {
         "while (".to_owned()
             + &self.expression.into_lua()
             + ") do\n"
-            + &indent(self.statement.into_lua(), 3)
+            + &indent(self.statement.into_lua() + "\n::continue::", 3)
             + "\nend"
     }
 }
 impl IntoLua for ast::DoWhileStatement {
     fn into_lua(&self) -> String {
         "repeat\n".to_owned()
-            + &indent(self.statement.into_lua(), 3)
+            + &indent(self.statement.into_lua() + "\n::continue::", 3)
             + "\nuntil not ("
             + &self.expression.into_lua()
             + ")"
@@ -647,7 +672,9 @@ impl IntoLua for ast::ForStatement {
         str.push_str(" do\n");
         str.push_str(&(indent(self.statement.into_lua(), 3) + "\n"));
         if self.step.is_some() {
-            str.push_str(&(indent(self.step.clone().unwrap().into_lua(), 3) + "\n"));
+            str.push_str(
+                &(indent(self.step.clone().unwrap().into_lua() + "\n::continue::", 3) + "\n"),
+            );
         }
         str.push_str("end");
         str
@@ -691,16 +718,23 @@ impl IntoLua for ast::Statement {
                     "return".to_string()
                 }
             }
-            Statement::Continue => "continue".to_string(),
+            Statement::Continue => "goto continue".to_string(),
             Statement::Break => "break".to_string(),
             _ => "--[[ unhandled statement ]]".to_string(),
             //_ => format!("--[[{:?}]]", self),
-        })
+        }) + "\n"
     }
 }
 impl IntoLua for ast::Identifier {
     fn into_lua(&self) -> String {
-        self.name.clone()
+        let keywords = [
+            "while", "for", "do", "if", "repeat", "until", "end", "break", "then", "else", "elseif",
+        ];
+        let mut s = self.name.clone();
+        if keywords.contains(&s.as_str()) {
+            s = "_______________".to_owned().to_owned() + &s // I mean, it'll work...
+        };
+        s
     }
 }
 impl IntoLua for ast::StructKind {
@@ -721,6 +755,54 @@ impl IntoLua for ast::StructType {
         // declarations don't matter!!!!
     }
 }
+impl IntoLua for ast::Enumerator {
+    fn into_lua(&self) -> String {
+        // TODO: the expressions that come with this
+        self.identifier.into_lua()
+    }
+}
+impl IntoLua for ast::EnumType {
+    fn into_lua(&self) -> String {
+        if self.identifier.is_some() {
+            let mut number = 0;
+            "local enum ".to_owned()
+                + &self.identifier.clone().unwrap().into_lua()
+                + "\n"
+                + &indent(
+                    self.enumerators
+                        .iter()
+                        .map(|x| "\"".to_string() + &x.into_lua() + "\"")
+                        .collect::<Vec<String>>()
+                        .join("\n"),
+                    3,
+                )
+                + "end\n"
+                // + "local "
+                + &self
+                    .enumerators
+                    .iter()
+                    .map(|x| x.into_lua())
+                    .collect::<Vec<String>>()
+                    .join(",")
+                + " = "
+                + &self
+                    .enumerators
+                    .iter()
+                    .map(|x| {
+                        if x.node.expression.is_some() {
+                            x.node.expression.clone().unwrap().into_lua()
+                        } else {
+                            number = number + 1;
+                            (number - 1).to_string()
+                        }
+                    })
+                    .collect::<Vec<String>>()
+                    .join(", ")
+        } else {
+            "--[[one enum, no identifier, please]]".to_string()
+        }
+    }
+}
 impl IntoLua for ast::TypeSpecifier {
     fn into_lua(&self) -> String {
         match self {
@@ -737,6 +819,7 @@ impl IntoLua for ast::TypeSpecifier {
             TypeSpecifier::Complex => "complex".to_string(),
             TypeSpecifier::Struct(d) => d.into_lua(),
             TypeSpecifier::TypedefName(i) => i.into_lua(),
+            TypeSpecifier::Enum(t) => t.into_lua(),
             _ => "nil--[[unimpl. type spec]]".to_string(),
         }
     }
@@ -906,73 +989,91 @@ fn transform_type<T: IntoLua>(deriv: Vec<Node<DerivedDeclarator>>, var: T) -> St
 }
 impl IntoLua for ast::ParameterDeclaration {
     fn into_lua(&self) -> String {
+        let mut s = "".to_string();
         if self.declarator.is_some() && !self.declarator.clone().unwrap().into_lua().is_empty() {
             // declarator has the derived stuff
             // specifier has the type name
             // current bug: ends up with "a: <const>,: realType<aaa>"
-            let mut s = self.declarator.clone().unwrap().into_lua();
-            let mut iter = self.specifiers.iter().filter(|x| !x.into_lua().is_empty());
-            let mut first = true;
-            loop {
-                if first {
-                    first = false;
-                } else {
-                    s.push_str(", ");
+            s = self.declarator.clone().unwrap().into_lua();
+        }
+        let mut iter = self
+            .specifiers
+            .iter()
+            .filter(|x| !x.into_lua().trim().is_empty());
+        let mut first = true;
+        // let mut temp = "".to_string();
+        'outer: loop {
+            if first {
+                first = false;
+            } else {
+                break;
+                // s.push_str(", ");
+            }
+            let mut v;
+            {
+                let a = iter.next();
+                if a.is_none() {
+                    break;
                 }
-                let mut v;
-                {
-                    let a = iter.next();
-                    if a.is_none() {
+                v = a.unwrap();
+                if v.into_lua().is_empty() | v.into_lua().trim().is_empty() {
+                    continue;
+                }
+            }
+            // guaranteed to not be a type qualifier
+            // s.push_str("--[[");
+            // s.push_str(&format!("{:?}", v));
+            // s.push_str("]]");
+            if let DeclarationSpecifier::TypeQualifier(t) = &v.node {
+                // println!("{:?}", t);
+                // s.push_str(&("--[[".to_owned() + &t.into_lua() + "]]"));
+                loop {
+                    {
+                        let a = iter.next();
+                        if a.is_none() {
+                            break 'outer;
+                        }
+                        v = a.unwrap();
+                        if v.into_lua().is_empty() | v.into_lua().trim().is_empty() {
+                            continue;
+                        }
+                    }
+                    if let DeclarationSpecifier::TypeQualifier(t) = &v.node {
+                        // s.push_str(&t.into_lua());
+                    } else {
                         break;
                     }
-                    v = a.unwrap();
                 }
-                // guaranteed to not be a type qualifier
+            }
+            if !v.node.into_lua().trim().is_empty() & self.declarator.is_some() {
                 s.push_str(": ");
-                if let DeclarationSpecifier::TypeQualifier(t) = &v.node {
-                    // println!("{:?}", t);
-                    // s.push_str(&("--[[".to_owned() + &t.into_lua() + "]]"));
-                    loop {
-                        {
-                            let a = iter.next();
-                            if a.is_none() {
-                                break;
-                            }
-                            v = a.unwrap();
-                        }
-                        if let DeclarationSpecifier::TypeQualifier(t) = &v.node {
-                            // s.push_str(&t.into_lua());
-                        } else {
-                            break;
-                        }
-                    }
-                }
                 s.push_str(&transform_type(
                     self.declarator.clone().unwrap().node.derived,
                     v.node.clone(),
                 ));
             }
-            s.truncate(s.len() - 2);
-            s
-            // self.specifiers
-            //     .iter()
-            //     .map(|a| {
-            //         ": ".to_owned()
-            //             + &transform_type(
-            //                 self.declarator.clone().unwrap().node.derived,
-            //                 a.node.clone(),
-            //             )
-            //     })
-            //     .collect::<Vec<String>>()
-            //     .join(",")
-            //     .as_str()
-        } else {
-            self.specifiers
-                .iter()
-                .map(|a| a.into_lua())
-                .collect::<Vec<String>>()
-                .join(",")
         }
+        // s.truncate(s.len() - 2);
+        s
+        // self.specifiers
+        //     .iter()
+        //     .map(|a| {
+        //         ": ".to_owned()
+        //             + &transform_type(
+        //                 self.declarator.clone().unwrap().node.derived,
+        //                 a.node.clone(),
+        //             )
+        //     })
+        //     .collect::<Vec<String>>()
+        //     .join(",")
+        //     .as_str()
+        // } else {
+        //     self.specifiers
+        //         .iter()
+        //         .map(|a| a.into_lua())
+        //         .collect::<Vec<String>>()
+        //         .join(",")
+        // }
     }
 }
 impl IntoLua for ast::FunctionDeclarator {
@@ -980,8 +1081,9 @@ impl IntoLua for ast::FunctionDeclarator {
         self.parameters
             .clone()
             .iter()
+            // .filter(|x| !x.node.declarator.is_none())
             .map(|a| a.into_lua())
-            .filter(|x| !x.is_empty())
+            .filter(|x| !x.trim().is_empty())
             .collect::<Vec<String>>()
             .join(", ")
             + {
@@ -1068,6 +1170,13 @@ impl IntoLua for ast::Declaration {
     fn into_lua(&self) -> String {
         // todo!("implement this...");
         if self.declarators.len() == 0 {
+            for x in self.specifiers.iter() {
+                if let DeclarationSpecifier::TypeSpecifier(k) = &x.node {
+                    if let TypeSpecifier::Enum(e) = &k.node {
+                        return e.node.into_lua();
+                    }
+                }
+            }
             return "".to_string();
         }
         "local ".to_string()+&self.declarators
@@ -1113,7 +1222,7 @@ impl IntoLua for ast::FunctionDefinition {
     fn into_lua(&self) -> String {
         // println!("{:?}\n", self);
         // todo!("trait this 3");
-        let mut str = "global function ".to_owned();
+        let mut str = "function ".to_owned();
         str.push_str(self.declarator.into_lua().as_str());
         str.push('(');
         str.push_str(
@@ -1167,6 +1276,7 @@ impl IntoLua for ast::FunctionDefinition {
 impl IntoLua for ast::DeclarationSpecifier {
     fn into_lua(&self) -> String {
         match self {
+            // NOTE: storage class serves NO purpose to me
             DeclarationSpecifier::StorageClass(s) => "".to_string(), //"--[[dspec storage class]]".to_string(),
             DeclarationSpecifier::TypeSpecifier(s) => get_practical_type(s.clone()),
             DeclarationSpecifier::TypeQualifier(s) => s.into_lua(), //"--[[dspec type qualifier]]".to_string(),
@@ -1193,7 +1303,7 @@ impl IntoLua for ast::ExternalDeclaration {
             ast::ExternalDeclaration::Declaration(b) => {
                 if !b.into_lua().is_empty() {
                     if b.node.declarators.len() == 0 {
-                        return "".to_string();
+                        return b.into_lua();
                     }
                     b.node.declarators
                         .iter()
@@ -1222,7 +1332,7 @@ impl IntoLua for ast::ExternalDeclaration {
                             .collect::<Vec<String>>()
                             .join(", ")+";"
                 } else {
-                    "--[[ empty declaration ]]".to_string()
+                    "--[[ ".to_string() + &format!("{:?}", b.node) + "]]"
                 }
             }
             ast::ExternalDeclaration::StaticAssert(b) => {
@@ -1237,12 +1347,14 @@ use clio::*;
 #[derive(Parser)]
 #[clap(name = "lilac")]
 struct Args {
-    #[clap(value_parser, default_value = "-", index = 1)]
-    input: Input,
+    #[clap(value_parser, default_value = "-")]
+    input: Vec<Input>,
     #[clap(long, short, value_parser, default_value = "-")]
     output: Output,
     #[clap(short)]
     c: bool,
+    #[clap(short)]
+    l: Vec<String>,
 }
 
 fn main() {
@@ -1252,23 +1364,49 @@ fn main() {
         flavor: lang_c::driver::Flavor::GnuC11,
     };
     let arg = Args::parse();
-    let result = parse(&config, arg.input.path().to_str().unwrap()).expect("to be okay");
-    let output = arg.output.path();
-    let mut s = "".to_string();
-    for node in result.unit.0.iter() {
-        s = s + &format!(
-            "{}",
-            // this doesn't work!!!
-            // I don't know why!!!
-            // it _should_ work, but it's not.
-            // and I can't really debug it any better.
-            node.into_lua()
-                .split("\n")
-                .filter(|&b| { !b.trim().is_empty() })
-                .collect::<Vec<&str>>()
-                .join("\n")
-        )
+    if arg.l.iter().any(|x| x == "m") {
+        // "linker" mode
+        let mut cmd = Command::new("tlld");
+        for file in arg.input.iter() {
+            cmd.arg(file.path().as_os_str());
+        }
+        cmd.arg("-o");
+        cmd.arg(arg.output.path().as_os_str());
+        cmd.spawn().unwrap();
+        // print!(
+        //     "{}",
+        //     Into::<OsStr>::into(cmd.output().unwrap().stdout)
+        //         .into_string()
+        //         .unwrap()
+        // );
+        return;
     }
+    let mut s = "".to_string();
+    let mut first = true;
+    for file in arg.input.iter() {
+        if first {
+            first = false;
+        } else {
+            s = s + "\n\n";
+        }
+        s = s + "--FILE " + file.path().to_str().unwrap() + "\n";
+        let result = parse(&config, file.path().to_str().unwrap()).expect("to be okay");
+        for node in result.unit.0.iter() {
+            s = s + &format!(
+                "{}\n",
+                // this doesn't work!!!
+                // I don't know why!!!
+                // it _should_ work, but it's not.
+                // and I can't really debug it any better.
+                node.into_lua()
+                    .split("\n")
+                    .filter(|&b| { !b.trim().is_empty() })
+                    .collect::<Vec<&str>>()
+                    .join("\n")
+            )
+        }
+    }
+    let output = arg.output.path();
     if arg.output.is_local() {
         let mut f = File::create(output.path()).expect("can open file");
         write!(f, "{}", s).expect("writing okay");

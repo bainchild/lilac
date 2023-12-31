@@ -36,7 +36,7 @@ default: makedir all
 
 # non-phony targets
 $(TARGET): $(OBJ)
-	$(LD) -o $@ $(OBJ) $(CFLAGS)
+	$(CC) -o $@ $(OBJ) $(CFLAGS) -lm
 
 $(OBJ_PATH)/%.o: $(SRC_PATH)/%.c*
 	$(CC) $(COBJFLAGS) -o $@ $<

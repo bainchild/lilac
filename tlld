@@ -1,11 +1,52 @@
 #!/bin/lua
 local argparse = require("argparse")
 local parser = argparse("tlld","'linker' for the uhhh transpiler (using teal)")
-parser:argument("input", "input file"):args("?")
+parser:argument("input", "input file"):args("*")
 parser:option("-o --output", "output file")
-parser:flag("-v --version", "show version info")
+parser:flag("--version", "show (fake) version info")
 parser:flag("-V", "show version info")
 local argg = parser:parse()
-if argg.version or argg.V then
-	return print("GNU ld (GNU Binutils for Debian) 2.40")
+if argg.version then
+   return print("GNU ld (GNU Binutils for Debian) 2.40")
+elseif argg.V then
+   return print("tlld v0.0.1")
 end
+local function execute(s)
+   print("> "..s)
+   os.execute(s)
+end
+local function split(a,b)
+   local m = {}
+   for mat in a:gmatch("(.-)"..b) do
+      table.insert(m,mat)
+   end
+   return m
+end
+local dir = "/tmp/tlld"
+os.execute("mkdir -p "..dir)
+for i,v in next, argg.input do
+   local spl = split(v,"/")
+   if #spl > 0 then
+      execute("mkdir -p "..dir.."/"..table.concat(spl,"/",1,#spl))
+   end
+end
+for i,v in next, argg.input do
+   execute("tl gen -o "..dir.."/"..v..".lua "..v)
+end
+local outs = ""
+for i,v in next, argg.input do
+   local f,e = io.open(dir.."/"..v..".lua","r")
+   if f==nil then error("Error reading from temp dir: "..tostring(e)) end
+   outs=outs..f:read("*a").."\n\n"
+   f:close()
+end
+outs=outs:sub(1,-3)
+if argg.output and argg.output~="-" then
+   local f = io.open(argg.output,"w")
+   if f==nil then error("Error opening output.") end
+   f:write(outs)
+   f:close()
+else
+   io.write(outs)
+end
+-- os.execute("rm -r "..dir)
