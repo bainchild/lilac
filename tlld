@@ -1,0 +1,11 @@
+#!/bin/lua
+local argparse = require("argparse")
+local parser = argparse("tlld","'linker' for the uhhh transpiler (using teal)")
+parser:argument("input", "input file"):args("?")
+parser:option("-o --output", "output file")
+parser:flag("-v --version", "show version info")
+parser:flag("-V", "show version info")
+local argg = parser:parse()
+if argg.version or argg.V then
+	return print("GNU ld (GNU Binutils for Debian) 2.40")
+end

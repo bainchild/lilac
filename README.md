@@ -1,0 +1,3 @@
+todo to the max...
+can compile basic C files to lua.
+two do: make it teal instead of lua.

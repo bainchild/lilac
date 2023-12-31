@@ -1,0 +1,4 @@
+/target
+/sample/glibc*
+/sample/newlib
+/sample/lua-5.1.5
