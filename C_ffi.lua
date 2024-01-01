@@ -141,12 +141,12 @@ local C;C = {
    TypeSizes = {
       -- bytes
       {'Ptr%b<>',4}, -- unsure about this
-      {'.+%[(%d*)%]',function(org,size)
+      {'.+%[(%d*)%]$',function(org,size)
          size=tonumber(size)
          if size==nil then
             return 0
          else
-            return size*C.SizeOfTypeStr(org:match("(.+)%[%d*%]"))
+            return size*C.SizeOfTypeStr(org:match("(.+)%[%d*%]$"))
          end
       end};
       {'Ptr',4},
@@ -188,6 +188,78 @@ function C.Serialize(t)
       return s
    end
    return "void"
+end
+function C.SerializeByType(v,t)
+   if t=="char[]" or t:match(".+%[(%d*)%]$") then
+      local cc = 0
+   elseif t=="int" then
+      local mat = {};
+      ("%04x"):format(v):gsub("%x%x",function(a) table.insert(mat,a) end);
+      return mat
+   elseif t=="char" or t=="byte" or t=="void" then
+      local mat = {};
+      ("%02x"):format(v):gsub("%x%x",function(a) table.insert(mat,a) end);
+      return mat
+   -- elseif t=="table" then
+   --    -- assume array
+   --    local s = ""
+   --    for _,v in next, t do
+   --       s=s..C.Serialize(v)
+   --    end
+   --    return s
+   end
+   return {}
+end
+function C.Deserialize(typ,bytes)
+   if typ=="int" or typ:match("Ptr") or typ:match("Ptr%b<>") then
+      return tonumber(string.format("%02x%02x%02x%02x",(unpack or table.unpack)(bytes)),16)
+   elseif typ=="byte" or typ=="void" then
+      return bytes[1]
+   elseif typ:match("char%[%d*%]") then
+      local size = typ:match("char%[(%d*)%]")
+      if size==nil then
+         for i=1,#bytes do
+            if bytes[i]=="\0" then
+               size=i;break
+            end
+         end
+      end
+      local c=""
+      for i=1,size do
+         c=c..string.char(bytes[i])
+      end
+      return c
+   elseif typ:match(".*%[%d*%]$") then
+      local size = typ:match(".*%[(%d*)%]$")
+      local sub = typ:match("(.*)%[%d*%]$")
+      local t = {}
+      if size==nil then
+         repeat
+            table.insert(t,C.Deserialize(sub,{(unpack or table.unpack)(bytes,i*C.SizeOfTypeStr(sub),(i+1)*C.SizeOfTypeStr(sub))}))
+         until #bytes<C.SizeOfTypeStr(sub)
+      else
+         for i=1,size do
+            table.insert(t,C.Deserialize(sub,{(unpack or table.unpack)(bytes,i*C.SizeOfTypeStr(sub),(i+1)*C.SizeOfTypeStr(sub))}))
+         end
+      end
+   end
+   return 0
+end
+function C.Write(typ,ptr,val)
+   local ser = C.SerializeByType(val,typ)
+   for i=0,#ser do
+      C.Memory[ptr+i]=ser[i]
+   end
+   return ptr
+end
+function C.Read(typ,ptr)
+   local len = -1
+   if typ=="char[]" then
+      repeat len=len+1 until C.Memory[len]==0
+   else
+      len = C.SizeOfType(len)
+   end
+   return C.Deserialize(typ,{(unpack or table.unpack)(C.Memory,ptr,ptr+len)})
 end
 function C.Deref(a)
    return find(C.Pointers,a)
