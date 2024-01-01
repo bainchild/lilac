@@ -8,7 +8,7 @@ local argc,argv = C.Obj(#args), C.Ptr(C.Ptr(C.Obj((function()
       n[i-1] = args[i]
    end
    return n
-end)()))) 
+end)())))
 require(file)
 if main then
    main(argc,argv)
