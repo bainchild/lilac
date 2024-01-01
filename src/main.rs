@@ -148,25 +148,29 @@ impl IntoLua for ast::CallExpression {
 }
 impl IntoLua for ast::Constant {
     fn into_lua(&self) -> String {
-        match self {
-            Constant::Integer(i) => match i.base {
-                IntegerBase::Decimal => i.number.to_string(),
-                IntegerBase::Binary => {
-                    "tonumber(\"".to_owned() + i.number.clone().into_string().as_str() + "\",2)"
-                }
-                IntegerBase::Octal => {
-                    "tonumber(\"".to_owned() + i.number.clone().into_string().as_str() + "\",8)"
-                }
-                IntegerBase::Hexadecimal => {
-                    "0x".to_owned() + i.number.clone().into_string().as_str()
-                }
-            },
-            Constant::Float(f) => match f.base {
-                FloatBase::Decimal => f.number.to_string(),
-                FloatBase::Hexadecimal => "0x".to_owned() + f.number.clone().into_string().as_str(),
-            },
-            Constant::Character(c) => c.into(),
-        }
+        "____C.Cst(".to_owned()
+            + &(match self {
+                Constant::Integer(i) => match i.base {
+                    IntegerBase::Decimal => i.number.to_string(),
+                    IntegerBase::Binary => {
+                        "tonumber(\"".to_owned() + i.number.clone().into_string().as_str() + "\",2)"
+                    }
+                    IntegerBase::Octal => {
+                        "tonumber(\"".to_owned() + i.number.clone().into_string().as_str() + "\",8)"
+                    }
+                    IntegerBase::Hexadecimal => {
+                        "0x".to_owned() + i.number.clone().into_string().as_str()
+                    }
+                },
+                Constant::Float(f) => match f.base {
+                    FloatBase::Decimal => f.number.to_string(),
+                    FloatBase::Hexadecimal => {
+                        "0x".to_owned() + f.number.clone().into_string().as_str()
+                    }
+                },
+                Constant::Character(c) => c.into(),
+            })
+            + ")"
     }
 }
 impl IntoLua for ast::MemberOperator {
