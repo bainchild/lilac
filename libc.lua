@@ -1,6 +1,7 @@
 if ____C == nil then require('C_ffi') end
 local C = ____C
 NULL = C.Ptr(C.Cst(0))
+local m = {}
 local function wrap(a,retptr)
    return function(...)
       local n = {}
@@ -31,45 +32,45 @@ local function wrap(a,retptr)
       return (unpack or table.unpack)(res)
    end
 end
-strlen = wrap(function(s,maxlen)
+m.strlen = wrap(function(s,maxlen)
    local l = -1
    repeat l=l+1 until NULL==C.Memory[s+l] or l==maxlen
    return l
 end)
 -- wcslen
-strnlen = wrap(function(s)
+m.strnlen = wrap(function(s)
    local l = -1
    repeat l=l+1 until NULL==C.Memory[s+l]
    return l
 end)
 -- wcsnlen
-memcpy = wrap(function(to,from,size)
+m.memcpy = wrap(function(to,from,size)
    for i=0,size do
       C.Memory[to+i] = C.Memory[from+i]
    end
    return to
 end)
-wmemcpy = wrap(function(wto,wfrom,size)
+m.wmemcpy = wrap(function(wto,wfrom,size)
    -- maybe?
    for i=0,size*C.SizeOfTypeStr("wchar_t") do
       C.Memory[wto+i] = C.Memory[wfrom+i]
    end
    return wto
 end)
-mempcpy = wrap(function(to, from, size)
+m.mempcpy = wrap(function(to, from, size)
    for i=0,size do
       C.Memory[to+i] = C.Memory[from+i]
    end
    return C.Obj(to+size+1)
 end)
-wmempcpy = wrap(function(wto,wfrom,size)
+m.wmempcpy = wrap(function(wto,wfrom,size)
    -- maybe?
    for i=0,size*C.SizeOfTypeStr("wchar_t") do
       C.Memory[wto+i] = C.Memory[wfrom+i]
    end
    return C.Obj(wto+size*C.SizeOfTypeStr("wchar_t")+1)
 end)
-memmove = wrap(function(to,from,size)
+m.memmove = wrap(function(to,from,size)
    local origs = {}
    for i=0,size do
       origs[i] = C.Memory[to+i]
@@ -79,7 +80,7 @@ memmove = wrap(function(to,from,size)
    end
    return to
 end)
-wmemmove = wrap(function(wto,wfrom,size)
+m.wmemmove = wrap(function(wto,wfrom,size)
    local origs = {}
    for i=0,size*C.SizeOfTypeStr("wchar_t") do
       origs[i] = C.Memory[wfrom+i]
@@ -89,7 +90,7 @@ wmemmove = wrap(function(wto,wfrom,size)
    end
    return C.Obj(wto+size*C.SizeOfTypeStr("wchar_t")+1)
 end)
-memccpy = wrap(function(to,from,c,size)
+m.memccpy = wrap(function(to,from,c,size)
    local pt
    for i=0,size do
       local f = C.Memory[from+i]
@@ -105,29 +106,29 @@ memccpy = wrap(function(to,from,c,size)
       return NULL
    end
 end,true)
-memset = wrap(function(block,c,size)
+m.memset = wrap(function(block,c,size)
    for i=0,size do
       C.Memory[block+i] = c
    end
    return block
 end,true)
-wmemset = wrap(function(block,c,size)
+m.wmemset = wrap(function(block,c,size)
    for i=0,size*C.SizeOfTypeStr("wchar_t") do
       C.Memory[block+i] = c
    end
    return block
 end,true)
-strcpy = wrap(function(to,from)
-   local s = strlen(from)
+m.strcpy = wrap(function(to,from)
+   local s = m.strlen(from)
    for i=0,s do
       C.Memory[to+i] = C.Memory[from+i]
    end
    return to
 end,true)
 -- wcscpy
-strdup = wrap(function(s)
-   local size = strlen(s)
-   local p = malloc(size)
+m.strdup = wrap(function(s)
+   local size = m.strlen(s)
+   local p = m.malloc(size)
    if p==-1 then return NULL end
    for i=0,size do
       C.Memory[p+i] = C.Memory[s+i]
@@ -135,7 +136,7 @@ strdup = wrap(function(s)
    return p
 end,true)
 -- wcsdupi
-stpcpy = wrap(function(s)
+m.stpcpy = wrap(function(s)
    local size = strlen(s)
    local p = malloc(size)
    if p==-1 then return NULL end
@@ -146,7 +147,7 @@ stpcpy = wrap(function(s)
 end,true)
 -- wcpcpy
 -- stdupa (?)
-bcopy = wrap(function(from,to,size)
+m.bcopy = wrap(function(from,to,size)
    local origs = {}
    for i=0,size do
       origs[i] = C.Memory[to+i]
@@ -155,10 +156,10 @@ bcopy = wrap(function(from,to,size)
       C.Memory[from+i] = origs[i]
    end
 end)
-bzero = wrap(function(block,size)
+m.bzero = wrap(function(block,size)
    for i=0,size do C.Memory[block+i] = 0 end
 end)
-malloc = wrap(function(size)
+m.malloc = wrap(function(size)
    local total = count*eltsize
    local ob = C.Object.new()
    local fs = C.GetFreeSpace()
@@ -166,13 +167,13 @@ malloc = wrap(function(size)
    rawset(ob,"region",{begin=fs,_end=fs+total})
    return ob
 end,true)
-calloc = wrap(function(count,eltsize)
+m.calloc = wrap(function(count,eltsize)
    local total = count*eltsize
    local ob = C.Obj(("\0"):rep(total))
    rawset(ob,"real",nil)
    return ob
 end,true)
-strcat = wrap(function(to,from)
+m.strcat = wrap(function(to,from)
    local l1,l2 = strlen(from),strlen(to)
    for i=0,l1 do
       C.Memory[to+l2-1] = C.Memory[from+i]
@@ -192,7 +193,7 @@ end,true)
 --wcslcpy
 --strlcat
 --wcslcat
-memcmp = wrap(function(a1,a2,size)
+m.memcmp = wrap(function(a1,a2,size)
    for i=0,size do
       if C.Memory[a1+i]~=C.Memory[a2+i] then
          return C.Memory[a1+i]-C.Memory[a2+i]
@@ -201,69 +202,69 @@ memcmp = wrap(function(a1,a2,size)
    return 0
 end,true)
 -- wmemcmp
-strcmp = wrap(function(s1,s2)
-   return memcmp(s1,s2,math.max(strlen(s1),strlen(s2)))
+m.strcmp = wrap(function(s1,s2)
+   return m.memcmp(s1,s2,math.max(strlen(s1),strlen(s2)))
 end,true)
 -- wcscmp
 -- TODO: strcasecmp
 -- wcscasecmp
-strncmp = wrap(function(s1,s2,size)
-   return memcmp(s1,s2,math.min(math.max(strlen(s1),strlen(s2)),size))
+m.strncmp = wrap(function(s1,s2,size)
+   return m.memcmp(s1,s2,math.min(math.max(strlen(s1),strlen(s2)),size))
 end,true)
 -- wcsncmp
 -- TODO: strncasecmp
 -- wcsncasecmp
 -- TODO: strverscmp
-bcmp = memcmp
+m.bcmp = m.memcmp
 -- TODO: strcoll
 -- wcscoll
 -- TODO: you're listening to strxfrm, only REAL ROCK FM
 -- wcsxfrm
-memchr = wrap(function(block,c,size)
+m.memchr = wrap(function(block,c,size)
    for i=0,size do
       if C.Memory[block+i] == c then return block+i end
    end
    return NULL
 end,true)
 -- wmemchr
-rawmemchr = wrap(function(blk,c)
+m.rawmemchr = wrap(function(blk,c)
    local i=0
    repeat i=i+1 until i>2^31 or C.Memory[blk+i] == c
    if i>2^31 then return NULL end
    return blk+i
 end,true)
-memrchr = wrap(function(block,c,size)
+m.memrchr = wrap(function(block,c,size)
    for i=size,0,-1 do
       if C.Memory[block+i] == c then return block+i end
    end
    return NULL
 end,true)
-strchr = wrap(function(str,c)
-   for i=0,strlen(str) do
+m.strchr = wrap(function(str,c)
+   for i=0,m.strlen(str) do
       if C.Memory[str+i] == c then return str+i end
    end
    return NULL
 end,true)
 --wcschr
-strchrnul = wrap(function(str,c)
-   local len = strlen(str)
+m.strchrnul = wrap(function(str,c)
+   local len = m.strlen(str)
    for i=0,len do
       if C.Memory[str+i] == c then return str+i end
    end
    return str+len
 end,true)
 --wcschrnul
-strrchr = wrap(function(str,c)
-   for i=strlen(str),0,-1 do
+m.strrchr = wrap(function(str,c)
+   for i=m.strlen(str),0,-1 do
       if C.Memory[str+i] == c then return str+i end
    end
    return NULL
 end,true)
 --wcsrchr
-strstr = wrap(function(hay,needle)
-   for i=0,strlen(hay) do
+m.strstr = wrap(function(hay,needle)
+   for i=0,m.strlen(hay) do
       local mat = true
-      for i2=0,strlen(needle) do
+      for i2=0,m.strlen(needle) do
          if C.Memory[hay+i]~=C.Memory[needle+i2] then
             mat=false; break
          end
@@ -275,7 +276,7 @@ end,true)
 --wcsstr
 --wcswcs
 --TODO: strcasestr
-memmem = wrap(function(hay,haylen,needle,needlelen)
+m.memmem = wrap(function(hay,haylen,needle,needlelen)
    for i=0,haylen do
       local mat = true
       for i2=0,needlelen do
@@ -287,12 +288,12 @@ memmem = wrap(function(hay,haylen,needle,needlelen)
    end
    return NULL
 end,true)
-strspn = wrap(function(string,skipset)
-   local len = strlen(string)
+m.strspn = wrap(function(string,skipset)
+   local len = m.strlen(string)
    for i=0,len do
       local char = C.Memory[string+i]
       local good = false
-      for n=0,strlen(skipset) do
+      for n=0,m.strlen(skipset) do
          if C.Memory[skipset+n]==char then good=true; break end
       end
       if not good then return i end
@@ -300,12 +301,12 @@ strspn = wrap(function(string,skipset)
    return len
 end,false)
 --wcsspn
-strcspn = wrap(function(string,stopset)
-   local len = strlen(string)
+m.strcspn = wrap(function(string,stopset)
+   local len = m.strlen(string)
    for i=0,len do
       local char = C.Memory[string+i]
       local good = true
-      for n=0,strlen(stopset) do
+      for n=0,m.strlen(stopset) do
          if C.Memory[stopset+n]==char then good=false; break end
       end
       if not good then return i end
@@ -313,12 +314,12 @@ strcspn = wrap(function(string,stopset)
    return len
 end,false)
 --wcscpn
-strcspn = wrap(function(string,stopset)
-   local len = strlen(string)
+m.strcspn = wrap(function(string,stopset)
+   local len = m.strlen(string)
    for i=0,len do
       local char = C.Memory[string+i]
       local good = true
-      for n=0,strlen(stopset) do
+      for n=0,m.strlen(stopset) do
          if C.Memory[stopset+n]==char then good=false; break end
       end
       if not good then return string+i end
@@ -326,22 +327,22 @@ strcspn = wrap(function(string,stopset)
    return NULL
 end,true)
 -- wcspbrk
-index = strchr
-rindex = strrchr
+m.index = m.strchr
+m.rindex = m.strrchr
 local internal_strtok_state = nil
-strtok = wrap(function(newstring,delim)
+m.strtok = wrap(function(newstring,delim)
    if newstring == NULL and internal_strtok_state == nil then
       return NULL
    elseif newstring~=NULL then
       internal_strtok_state={newstring,0}
    end
    local str = internal_strtok_state[1]
-   local strslen = strlen(str)
+   local strslen = m.strlen(str)
    local count = 0
    local first
    for i=internal_strtok_state[2],strslen do
       local c = C.Memory[str+i]
-      for i2=0,strlen(delim) do
+      for i2=0,m.strlen(delim) do
          if c==C.Memory[delim+i2] then
             if first==nil then first=i end
             count=count+1
@@ -360,7 +361,7 @@ strtok = wrap(function(newstring,delim)
    return 
 end)
 --wcstok
-strtok_r = wrap(function(new,delim,save)
+m.strtok_r = wrap(function(new,delim,save)
    if newstring == NULL and C.Memory[save] == 0 then
       return NULL
    elseif newstring~=NULL then
@@ -374,14 +375,14 @@ strtok_r = wrap(function(new,delim,save)
       end
    end
    local str = C.Read("Ptr<char[]>",C.Memory[save])
-   local strslen = strlen(str)
+   local strslen = m.strlen(str)
    local startc = C.Memory[save+C.SizeOfTypeStr("Ptr<char[]>")]
    local tokn = C.Read("int",startc)
    local count = 0
    local first
    for i=tokn,strslen do
       local c = C.Memory[str+i]
-      for i2=0,strlen(delim) do
+      for i2=0,m.strlen(delim) do
          if c==C.Memory[delim+i2] then
             if first==nil then first=i end
             count=count+1
@@ -401,25 +402,25 @@ strtok_r = wrap(function(new,delim,save)
 end,true)
 -- TODO: strsep, also rework above 2 for the storage
 -- TODO: basename + dirname
-explicit_bzero = bzero
+m.explicit_bzero = bzero
 -- TODO: in the kitchen, wrist twistin' like it's strfry
-memfrob = wrap(function(mem,length)
+m.memfrob = wrap(function(mem,length)
    for i=0,length do
       C.Memory[mem+i] = bit32.xor(C.Memory[mem+i],0x2a)
    end
    return mem
 end,true)
-l64a = wrap(function(n)
+m.l64a = wrap(function(n)
    if n==0 then return "" end
    return base64e(C.Read("char[4]",n))
 end,true)
-a64l = wrap(function(n)
+m.a64l = wrap(function(n)
    return base64d(C.Read("char[4]",n))
 end,true)
 -- BIG TODO: argz + envz
 -- BIG TWODO: searching and sorting
 -- and the pattern matching...
-function printf(fs,...)
+function m.printf(fs,...)
    if C.Object.is(fs) or C.Pointer.is(fs) then
       fs=fs[C.Escape]
    end
@@ -431,3 +432,20 @@ function printf(fs,...)
    end
    io.write(fs:format(table.unpack(args)))
 end
+function m.print(...)
+   local args = {...}
+   for i,v in next, args do
+      if C.Object.is(v) or C.Pointer.is(v) then
+         args[i] = v[C.Escape]
+      end
+   end
+   local n = ""
+   for i,v in next, args do
+      if i~=1 then
+         n=n.." "
+      end
+      n=n..tostring(v)
+   end
+   return print(n)
+end
+return m

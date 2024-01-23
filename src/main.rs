@@ -717,9 +717,9 @@ impl IntoLua for ast::Statement {
             // Statement::Asm(t) => t.into_lua(),
             Statement::Return(t) => {
                 if t.is_some() {
-                    "return (".to_owned() + t.as_ref().unwrap().into_lua().as_str() + ")"
+                    "do return (".to_owned() + t.as_ref().unwrap().into_lua().as_str() + ") end"
                 } else {
-                    "return".to_string()
+                    "do return end".to_string()
                 }
             }
             Statement::Continue => "goto continue".to_string(),
@@ -1226,7 +1226,7 @@ impl IntoLua for ast::FunctionDefinition {
     fn into_lua(&self) -> String {
         // println!("{:?}\n", self);
         // todo!("trait this 3");
-        let mut str = "function ".to_owned();
+        let mut str = "function _D.".to_owned();
         str.push_str(self.declarator.into_lua().as_str());
         str.push('(');
         str.push_str(
@@ -1309,6 +1309,9 @@ impl IntoLua for ast::ExternalDeclaration {
                     if b.node.declarators.len() == 0 {
                         return b.into_lua();
                     }
+                    if true {
+                        return "".to_string();
+                    }
                     b.node.declarators
                         .iter()
                         .map(|b|b.into_lua())
@@ -1363,9 +1366,9 @@ struct Args {
 
 fn main() {
     let config = Config {
-        cpp_command: "gcc".to_string(),
+        cpp_command: "clang".to_string(),
         cpp_options: vec!["-nostdlib".to_string(), "-E".to_string()],
-        flavor: lang_c::driver::Flavor::GnuC11,
+        flavor: lang_c::driver::Flavor::ClangC11,
     };
     let arg = Args::parse();
     if arg.l.iter().any(|x| x == "m") {
@@ -1393,9 +1396,13 @@ fn main() {
         } else {
             s = s + "\n\n";
         }
-        s = s + "--FILE " + file.path().to_str().unwrap() + "\n";
-        let result = parse(&config, file.path().to_str().unwrap()).expect("to be okay");
-        for node in result.unit.0.iter() {
+        s = s + "--FILE " + file.path().to_str().unwrap() + "\nlocal _D = {};";
+        let result = parse(&config, file.path().to_str().unwrap());
+        if result.is_err() {
+            print!("{}", result.err().unwrap());
+            return;
+        }
+        for node in result.unwrap().unit.0.iter() {
             s = s + &format!(
                 "{}\n",
                 // this doesn't work!!!
@@ -1409,6 +1416,7 @@ fn main() {
                     .join("\n")
             )
         }
+        s = s + "return _D"
     }
     let output = arg.output.path();
     if arg.output.is_local() {
