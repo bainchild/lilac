@@ -55,6 +55,12 @@ impl<T: IntoLua> IntoLua for Node<T> {
 //         str
 //     }
 // }
+fn possible_identifier_quote(s: &Node<Expression>) -> String {
+    match s.clone().node {
+        Expression::Identifier(j) => "'".to_string() + &j.into_lua() + "'",
+        _ => s.into_lua(),
+    }
+}
 fn get_practical_type(s: Node<TypeSpecifier>) -> String {
     // if s.into_lua().trim().is_empty() {
     //     return "AAAAAAAAAAAAAAAAAAAAAA".to_string();
@@ -134,9 +140,9 @@ impl IntoLua for ast::BlockItem {
 }
 impl IntoLua for ast::CallExpression {
     fn into_lua(&self) -> String {
-        "_D.".to_string()
-            + &self.callee.into_lua()
-            + "("
+        "_D[".to_string()
+            + &possible_identifier_quote(&self.callee.to_owned())
+            + "]("
             + self
                 .arguments
                 .iter()
@@ -560,9 +566,9 @@ impl IntoLua for ast::ConditionalExpression {
         "(function()if (".to_owned()
             + &self.condition.into_lua()
             + ") then return ("
-            + &self.then_expression.into_lua()
+            + &possible_identifier_quote(&self.then_expression.to_owned())
             + "); else return ("
-            + &self.else_expression.into_lua()
+            + &possible_identifier_quote(&self.else_expression.to_owned())
             + "); end end)()"
     }
 }
@@ -1273,7 +1279,11 @@ impl IntoLua for ast::FunctionDefinition {
             str.push_str("\n");
         }
         str.push_str(indent(self.statement.into_lua(), 3).as_str());
-        str.push_str("end");
+        str.push_str("end;");
+        str.push_str(self.declarator.into_lua().as_str());
+        str.push_str("=_D['");
+        str.push_str(self.declarator.into_lua().as_str());
+        str.push_str("']");
         str
     }
 }
@@ -1310,9 +1320,6 @@ impl IntoLua for ast::ExternalDeclaration {
                     if b.node.declarators.len() == 0 {
                         return b.into_lua();
                     }
-                    if true {
-                        return "".to_string();
-                    }
                     b.node.declarators
                         .iter()
                         .map(|b|b.into_lua())
@@ -1334,8 +1341,8 @@ impl IntoLua for ast::ExternalDeclaration {
                                 if a.node.initializer.is_some() {
                                     a.node.initializer.clone().unwrap().into_lua()
                                 } else if let DeclaratorKind::Identifier(t) = &a.node.declarator.node.kind.node {
-                                    t.into_lua()
-                                } else {"____C.Uninitialized()--[[maybe]]".to_string()}
+                                    "_D['".to_string()+&t.into_lua()+"']"
+                                } else {a.into_lua()+" or ____C.Uninitialized()--[[maybe]]"}
                             })
                             .collect::<Vec<String>>()
                             .join(", ")+";"
@@ -1357,21 +1364,36 @@ use clio::*;
 struct Args {
     #[clap(value_parser, default_value = "-")]
     input: Vec<Input>,
-    #[clap(long, short, value_parser, default_value = "-")]
+    #[clap(long, short, value_parser, default_value = "a.out")]
     output: Output,
     #[clap(short)]
     c: bool,
     #[clap(short)]
     l: Vec<String>,
+    #[clap(short = 'O')]
+    optimize: Option<u8>,
+    #[clap(short = 'W')]
+    warn: Vec<String>,
+    #[clap(short = 'D')]
+    define: Vec<String>,
 }
 
 fn main() {
+    let arg = Args::parse();
     let config = Config {
         cpp_command: "clang".to_string(),
-        cpp_options: vec!["-nostdlib".to_string(), "-E".to_string()],
+        cpp_options: {
+            let mut v = Vec::new();
+            v.push("-nostdlib".to_string());
+            v.push("-E".to_string());
+            arg.define
+                .iter()
+                .map(|x| "-D".to_string() + &x)
+                .for_each(|x| v.push(x));
+            v
+        },
         flavor: lang_c::driver::Flavor::ClangC11,
     };
-    let arg = Args::parse();
     if arg.l.iter().any(|x| x == "m") {
         // "linker" mode
         let mut cmd = Command::new("tlld");
@@ -1397,7 +1419,10 @@ fn main() {
         } else {
             s = s + "\n\n";
         }
-        s = s + "--FILE " + file.path().to_str().unwrap() + "\nlocal _D = {};\n";
+        s = s
+            + "--FILE "
+            + file.path().to_str().unwrap()
+            + "\n---@diagnostic disable: lowercase-global\nlocal _D = (____C and ____C.env) or {};\n";
         let result = parse(&config, file.path().to_str().unwrap());
         if result.is_err() {
             print!("{}", result.err().unwrap());
