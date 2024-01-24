@@ -1396,7 +1396,7 @@ fn main() {
         } else {
             s = s + "\n\n";
         }
-        s = s + "--FILE " + file.path().to_str().unwrap() + "\nlocal _D = {};";
+        s = s + "--FILE " + file.path().to_str().unwrap() + "\nlocal _D = {};\n";
         let result = parse(&config, file.path().to_str().unwrap());
         if result.is_err() {
             print!("{}", result.err().unwrap());
@@ -1416,7 +1416,7 @@ fn main() {
                     .join("\n")
             )
         }
-        s = s + "return _D"
+        s = s + "return _D;"
     }
     let output = arg.output.path();
     if arg.output.is_local() {
