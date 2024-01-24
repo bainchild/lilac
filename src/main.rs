@@ -134,7 +134,8 @@ impl IntoLua for ast::BlockItem {
 }
 impl IntoLua for ast::CallExpression {
     fn into_lua(&self) -> String {
-        self.callee.into_lua()
+        "_D.".to_string()
+            + &self.callee.into_lua()
             + "("
             + self
                 .arguments
