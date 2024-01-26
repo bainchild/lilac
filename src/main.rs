@@ -1,24 +1,11 @@
-use std::{
-    backtrace,
-    ffi::{OsStr, OsString},
-    fs::File,
-    io::Write,
-    ops::Deref,
-    os::fd::AsFd,
-    process::Command,
-    sync::Arc,
-    thread::spawn,
-    time::SystemTime,
-};
+use std::{fs::File, io::Write, process::Command, time::SystemTime};
 
 use lang_c::{
     ast::{
-        self, ArraySize, BinaryOperator, BlockItem, CastExpression, CompoundLiteral, Constant,
-        DeclarationSpecifier, DeclaratorKind, DerivedDeclarator, Ellipsis, Expression, FloatBase,
-        ForInitializer, FunctionSpecifier, GenericSelection, Identifier, Initializer, IntegerBase,
-        Label, MemberOperator, PointerQualifier, SpecifierQualifier, Statement,
-        StorageClassSpecifier, StructDeclaration, StructKind, StructType, TypeOf, TypeQualifier,
-        TypeSpecifier,
+        self, ArraySize, BinaryOperator, BlockItem, Constant, DeclarationSpecifier, DeclaratorKind,
+        DerivedDeclarator, Ellipsis, Expression, FloatBase, ForInitializer, FunctionSpecifier,
+        Initializer, IntegerBase, Label, MemberOperator, PointerQualifier, SpecifierQualifier,
+        Statement, StructDeclaration, StructKind, TypeQualifier, TypeSpecifier,
     },
     driver::{parse, Config},
     span::Node,
@@ -102,7 +89,7 @@ fn get_practical_type(s: Node<TypeSpecifier>) -> String {
                             s
                         }
                         StructKind::Struct => {
-                            let mut s = "".to_owned();
+                            let mut s = "--[[structing]]".to_owned();
                             if st.node.identifier.is_some() {
                                 s = s + "--[[";
                                 s = s + &st.node.identifier.unwrap().into_lua();
@@ -128,6 +115,20 @@ fn get_practical_type(s: Node<TypeSpecifier>) -> String {
         _ => vartype = "unknown".to_owned(),
     };
     vartype
+}
+impl IntoLua for ast::RangeDesignator {
+    fn into_lua(&self) -> String {
+        "Range(".to_string() + &self.from.into_lua() + "  ,  " + &self.to.into_lua() + ")"
+    }
+}
+impl IntoLua for ast::Designator {
+    fn into_lua(&self) -> String {
+        match self {
+            ast::Designator::Index(e) => "desigindex<".to_string() + &e.into_lua() + ">",
+            ast::Designator::Member(m) => "desigmembr<".to_string() + &m.into_lua() + ">",
+            ast::Designator::Range(r) => "desigrange<".to_string() + &r.into_lua() + ">",
+        }
+    }
 }
 impl IntoLua for ast::BlockItem {
     fn into_lua(&self) -> String {
@@ -592,7 +593,7 @@ impl IntoLua for ast::Expression {
                 for v in comm.iter().take(comm.len() - 1) {
                     s = s + &v.into_lua() + ";"
                 }
-                s = s + "return " + &comm.last().unwrap().into_lua();
+                s = s + "return (function() " + &comm.last().unwrap().into_lua() + " end)()";
                 s = s + " end)()";
                 s
             } // "--[[ comma ]]".to_string(),
@@ -907,8 +908,8 @@ impl IntoLua for ast::Extension {
 impl IntoLua for ast::StructDeclaration {
     fn into_lua(&self) -> String {
         match self {
-            StructDeclaration::Field(sf) => "--[[field]]".to_string(),
-            StructDeclaration::StaticAssert(aa) => "--[[assert]]".to_string(),
+            StructDeclaration::Field(_) => "--[[field]]".to_string(),
+            StructDeclaration::StaticAssert(_) => "--[[assert]]".to_string(),
         }
     }
 }
@@ -946,10 +947,10 @@ fn transform_type<T: IntoLua>(deriv: Vec<Node<DerivedDeclarator>>, var: T) -> St
     for v in to_apply.iter() {
         match &v.node {
             DerivedDeclarator::Array(dec) => match dec.node.clone().size {
-                ArraySize::Unknown => s = ("{".to_owned() + &s + "}"),
-                ArraySize::VariableUnknown => s = ("{".to_owned() + &s + "}--[[variable unknown]]"),
-                ArraySize::VariableExpression(e) => s = ("{".to_owned() + &s + "}"),
-                ArraySize::StaticExpression(e) => s = ("{".to_owned() + &s + "}"),
+                ArraySize::Unknown => s = "{".to_owned() + &s + "}",
+                ArraySize::VariableUnknown => s = "{".to_owned() + &s + "}--[[variable unknown]]",
+                ArraySize::VariableExpression(_) => s = "{".to_owned() + &s + "}",
+                ArraySize::StaticExpression(_) => s = "{".to_owned() + &s + "}",
             },
             DerivedDeclarator::Pointer(pq) => {
                 let mut ptr_names: Vec<&str> = Vec::with_capacity(7); // 7 type qualifiers
@@ -977,8 +978,7 @@ fn transform_type<T: IntoLua>(deriv: Vec<Node<DerivedDeclarator>>, var: T) -> St
                             }
                             TypeQualifier::Atomic => {
                                 ptr_names[0] = "A";
-                            }
-                            _ => {}
+                            } //_ => {}
                         }
                     }
                 }
@@ -1035,7 +1035,7 @@ impl IntoLua for ast::ParameterDeclaration {
             // s.push_str("--[[");
             // s.push_str(&format!("{:?}", v));
             // s.push_str("]]");
-            if let DeclarationSpecifier::TypeQualifier(t) = &v.node {
+            if let DeclarationSpecifier::TypeQualifier(_) = &v.node {
                 // println!("{:?}", t);
                 // s.push_str(&("--[[".to_owned() + &t.into_lua() + "]]"));
                 loop {
@@ -1049,7 +1049,7 @@ impl IntoLua for ast::ParameterDeclaration {
                             continue;
                         }
                     }
-                    if let DeclarationSpecifier::TypeQualifier(t) = &v.node {
+                    if let DeclarationSpecifier::TypeQualifier(_) = &v.node {
                         // s.push_str(&t.into_lua());
                     } else {
                         break;
@@ -1137,7 +1137,7 @@ impl IntoLua for ast::DerivedDeclarator {
                     "".to_string()
                 }
             }
-            DerivedDeclarator::Array(k) => "--[[umm array]]".to_string(),
+            DerivedDeclarator::Array(_) => "--[[umm array]]".to_string(),
             DerivedDeclarator::Function(k) => k.into_lua(),
             DerivedDeclarator::KRFunction(k) => {
                 "function(".to_owned()
@@ -1147,8 +1147,8 @@ impl IntoLua for ast::DerivedDeclarator {
                         .join(", ")
                     + ")"
             }
-            DerivedDeclarator::Block(k) => "--[[umm block]]".to_string(),
-            _ => format!("--[[{:?}]]", self).to_owned(),
+            DerivedDeclarator::Block(_) => "--[[umm block]]".to_string(),
+            //_ => format!("--[[{:?}]]", self).to_owned(),
         }
     }
 }
@@ -1160,6 +1160,13 @@ impl IntoLua for ast::InitDeclarator {
 impl IntoLua for ast::InitializerListItem {
     fn into_lua(&self) -> String {
         self.initializer.node.into_lua()
+        // + "\n-- designators: "
+        // + &self
+        //     .designation
+        //     .iter()
+        //     .map(|x| x.into_lua())
+        //     .collect::<Vec<String>>()
+        //     .join(", ")
     }
 }
 impl IntoLua for ast::Initializer {
@@ -1167,11 +1174,14 @@ impl IntoLua for ast::Initializer {
         match self {
             Initializer::Expression(b) => b.into_lua(),
             Initializer::List(b) => {
-                "____C.List({".to_owned()
-                    + &b.iter()
-                        .map(|x| x.into_lua())
-                        .collect::<Vec<String>>()
-                        .join(", ")
+                "____C.List({\n".to_owned()
+                    + &indent(
+                        b.iter()
+                            .map(|x| x.into_lua())
+                            .collect::<Vec<String>>()
+                            .join(";\n"),
+                        3,
+                    )
                     + "})"
             }
         }
@@ -1188,45 +1198,72 @@ impl IntoLua for ast::Declaration {
                     }
                 }
             }
-            return "".to_string();
+            return "--[[no declaration specifier, and len was 0]]".to_string();
         }
-        "local ".to_string()+&self.declarators
+        self.declarators
             .iter()
-            .map(|b|b.into_lua())
-            .collect::<Vec<String>>()
-            .join(", ")
-            // + "--[["
-            // TODO: types on these variables!
-            // + ": "
-            // + &self.declarators.iter().map(|b|{
-            //     transform_type(
-            //         b.node.declarator.node.derived.clone(),
-            //         b.node.declarator.node.derived.iter().map(|x|x.into_lua()).collect::<Vec<String>>().join(", "))
-            // }).into_iter().collect::<Vec<String>>().join(", ")
-            + " = "
-            + &self
-                .declarators
-                .iter()
-                .map(|a| {
-                    if a.node.initializer.is_some() {
-                        a.node.initializer.clone().unwrap().into_lua()
+            .map(|x| {
+                let val = {
+                    if x.node.initializer.is_some() {
+                        x.node.initializer.clone().unwrap().into_lua()
                     // } else if let DeclaratorKind::Identifier(t) = &a.node.declarator.node.kind.node {
                     //     t.into_lua()
                     } else {
                         "____C.Uninitialized()".to_string()
                     }
-                })
-                .collect::<Vec<String>>()
-                .join(", ")+";"
-        // + "]]"
-        // "".to_string()
+                };
+                "local ".to_string() + &x.into_lua() + " = " + &val
+            })
+            .collect::<Vec<String>>()
+            .join("; ")
+            + ";"
+        // "local ".to_string()+&self.declarators
+        //     .iter()
+        //     .map(|b|b.into_lua())
+        //     .collect::<Vec<String>>()
+        //     .join(", ")
+        //     // + "--[["
+        //     // TODO: types on these variables!
+        //     // + ": "
+        //     // + &self.declarators.iter().map(|b|{
+        //     //     transform_type(
+        //     //         b.node.declarator.node.derived.clone(),
+        //     //         b.node.declarator.node.derived.iter().map(|x|x.into_lua()).collect::<Vec<String>>().join(", "))
+        //     // }).into_iter().collect::<Vec<String>>().join(", ")
+        //     + " = "
+        //     + &self
+        //         .declarators
+        //         .iter()
+        //         .map(|a| {
+        //             if a.node.initializer.is_some() {
+        //                 a.node.initializer.clone().unwrap().into_lua()
+        //             // } else if let DeclaratorKind::Identifier(t) = &a.node.declarator.node.kind.node {
+        //             //     t.into_lua()
+        //             } else {
+        //                 "____C.Uninitialized()".to_string()
+        //             }
+        //         })
+        //         .collect::<Vec<String>>()
+        //         .join(", ")+";"
+        // // + "]]"
+        // // "".to_string()
     }
 }
 impl IntoLua for ast::StaticAssert {
     fn into_lua(&self) -> String {
         // println!("{:?}\n", self);
         // todo!("impl this 2");
-        "".to_string()
+        "--[[static assert ".to_string()
+            + &self.expression.into_lua()
+            + " -> "
+            + &self
+                .message
+                .node
+                .iter()
+                .map(|x| x.into_lua())
+                .collect::<Vec<String>>()
+                .join(" + ")
+            + "]]"
     }
 }
 impl IntoLua for ast::FunctionDefinition {
@@ -1292,23 +1329,22 @@ impl IntoLua for ast::DeclarationSpecifier {
     fn into_lua(&self) -> String {
         match self {
             // NOTE: storage class serves NO purpose to me
-            DeclarationSpecifier::StorageClass(s) => "".to_string(), //"--[[dspec storage class]]".to_string(),
+            DeclarationSpecifier::StorageClass(_s) => "".to_string(), //"--[[dspec storage class]]".to_string(),
             DeclarationSpecifier::TypeSpecifier(s) => get_practical_type(s.clone()),
             DeclarationSpecifier::TypeQualifier(s) => s.into_lua(), //"--[[dspec type qualifier]]".to_string(),
             DeclarationSpecifier::Function(s) => match s.node {
                 FunctionSpecifier::Noreturn => "function(...: unknown)".to_string(),
                 FunctionSpecifier::Inline => "function(...: unknown)".to_string(),
             }, //"--[[dspec function]]".to_string(),
-            DeclarationSpecifier::Alignment(s) => "--[[dspec alignment]]".to_string(),
-            DeclarationSpecifier::Extension(s) => {
-                "".to_string() /*"--[[ext: ".to_owned()
-                               + &s.iter()
-                                   .map(|x| x.into_lua())
-                                   .collect::<Vec<String>>()
-                                   .join(", ")
-                               + "]]"*/
-            }
-            _ => "--[[decl. specifier]]".to_string(),
+            DeclarationSpecifier::Alignment(_s) => "--[[dspec alignment]]".to_string(),
+            DeclarationSpecifier::Extension(_s) => {
+                "--[[extension]]".to_string() /*"--[[ext: ".to_owned()
+                                              + &s.iter()
+                                                  .map(|x| x.into_lua())
+                                                  .collect::<Vec<String>>()
+                                                  .join(", ")
+                                              + "]]"*/
+            } //_ => "--[[decl. specifier]]".to_string(),
         }
     }
 }
@@ -1342,7 +1378,7 @@ impl IntoLua for ast::ExternalDeclaration {
                                     a.node.initializer.clone().unwrap().into_lua()
                                 } else if let DeclaratorKind::Identifier(t) = &a.node.declarator.node.kind.node {
                                     "_D['".to_string()+&t.into_lua()+"']"
-                                } else {a.into_lua()+" or ____C.Uninitialized()--[[maybe]]"}
+                                } else {/*a.into_lua()+" or "+*/"_D['".to_string()+&a.into_lua()+"']"+" or ____C.Uninitialized()--[[maybe]]"}
                             })
                             .collect::<Vec<String>>()
                             .join(", ")+";"
@@ -1448,7 +1484,7 @@ fn main() {
     if arg.output.is_local() {
         let mut f = File::create(output.path()).expect("can open file");
         write!(f, "{}", s).expect("writing okay");
-        f.set_modified(SystemTime::now());
+        let _ = f.set_modified(SystemTime::now());
     } else {
         print!("{}", s);
     }
