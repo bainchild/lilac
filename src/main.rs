@@ -1,1538 +1,862 @@
-use std::{fs::File, io::Write, os, process::Command, time::SystemTime};
+// goal: make everything a number
+// and if not a number, a function
 
-use lang_c::{
-    ast::{
-        self, ArraySize, BinaryOperator, BlockItem, Constant, DeclarationSpecifier, DeclaratorKind,
-        DerivedDeclarator, Ellipsis, Expression, FloatBase, ForInitializer, FunctionSpecifier,
-        Initializer, IntegerBase, Label, MemberOperator, PointerQualifier, SpecifierQualifier,
-        Statement, StructDeclaration, StructKind, TypeQualifier, TypeSpecifier,
-    },
-    driver::{parse, Config},
-    span::Node,
-};
-// TODO: where are the enums???
-// todo: the clones are numerable
-fn indent(str: String, id: usize) -> String {
-    let indentation = " ".repeat(id);
-    let iter = str.split("\n");
-    iter.map(|a| indentation.clone() + a + "\n")
-        .collect::<Vec<String>>()
-        .concat()
-}
-trait IntoLua {
-    fn into_lua(&self) -> String;
-}
-impl IntoLua for String {
-    fn into_lua(&self) -> String {
-        self.to_string()
-        // "\"".to_owned() + self + "\""
-    }
-}
-impl<T: IntoLua> IntoLua for Node<T> {
-    fn into_lua(&self) -> String {
-        self.node.into_lua()
-    }
-}
-// impl<T: IntoLua> IntoLua for Vec<T> {
-//     fn into_lua(&self) -> String {
-//         let mut str = String::new();
-//         for nto in self.iter() {
-//             str.push_str(nto.into_lua().as_str());
-//         }
-//         str
-//     }
-// }
-fn possible_identifier_quote(s: &Node<Expression>) -> String {
-    match s.clone().node {
-        Expression::Identifier(j) => "'".to_string() + &j.into_lua() + "'",
-        _ => s.into_lua(),
-    }
-}
-fn get_practical_type(s: Node<TypeSpecifier>) -> String {
-    // if s.into_lua().trim().is_empty() {
-    //     return "AAAAAAAAAAAAAAAAAAAAAA".to_string();
-    // }
-    let vartype: String;
-    // this feels stupid. like... there should be a better solution to this
-    // but I haven't found it yet
-    match s.node.clone() {
-        TypeSpecifier::Void => vartype = "Void".to_owned(),
-        TypeSpecifier::Char => vartype = "Char".to_owned(),
-        TypeSpecifier::Short => vartype = "integer".to_owned(), //--[[short]]".to_owned(),
-        TypeSpecifier::Int => vartype = "integer".to_owned(),
-        TypeSpecifier::Long => vartype = "number".to_owned(), //--[[long]]".to_owned(),
-        TypeSpecifier::Float => vartype = "number".to_owned(), //--[[float]]".to_owned(),
-        TypeSpecifier::Double => vartype = "number".to_owned(), //--[[double]]".to_owned(),
-        TypeSpecifier::Signed => vartype = "number".to_owned(), //--[[signed]]".to_owned(),
-        TypeSpecifier::Unsigned => vartype = "integer".to_owned(), //--[[unsigned]]".to_owned(),
-        TypeSpecifier::Bool => vartype = "boolean".to_owned(),
-        TypeSpecifier::Complex => vartype = "number".to_owned(), //--[[complex]]".to_owned(),
-        TypeSpecifier::TypedefName(i) => vartype = i.into_lua(),
-        TypeSpecifier::Struct(st) => {
-            vartype = {
-                if st.node.declarations.is_some() {
-                    return match st.node.kind.node {
-                        StructKind::Union => {
-                            let mut s = "".to_owned();
-                            if st.node.identifier.is_some() {
-                                s = s + "--[[";
-                                s = s + &st.node.identifier.unwrap().into_lua();
-                                s = s + "]]";
-                            }
-                            st.node
-                                .declarations
-                                .unwrap()
-                                .iter()
-                                .map(|x| x.into_lua())
-                                .collect::<Vec<String>>()
-                                .join("|");
-                            s
-                        }
-                        StructKind::Struct => {
-                            let mut s = "--[[structing]]".to_owned();
-                            if st.node.identifier.is_some() {
-                                s = s + "--[[";
-                                s = s + &st.node.identifier.unwrap().into_lua();
-                                s = s + "]]";
-                            }
-                            s = s + "{";
-                            st.node
-                                .declarations
-                                .unwrap()
-                                .iter()
-                                .map(|x| x.into_lua())
-                                .collect::<Vec<String>>()
-                                .join(",");
-                            s = s + "}";
-                            s
-                        }
-                    };
-                }
-                "unknown--[[empty struct]]".to_owned()
-            }
-        }
-        .to_owned(),
-        _ => vartype = "unknown".to_owned(),
-    };
-    vartype
-}
-impl IntoLua for ast::RangeDesignator {
-    fn into_lua(&self) -> String {
-        "Range(".to_string() + &self.from.into_lua() + "  ,  " + &self.to.into_lua() + ")"
-    }
-}
-impl IntoLua for ast::Designator {
-    fn into_lua(&self) -> String {
-        match self {
-            ast::Designator::Index(e) => "desigindex<".to_string() + &e.into_lua() + ">",
-            ast::Designator::Member(m) => "desigmembr<".to_string() + &m.into_lua() + ">",
-            ast::Designator::Range(r) => "desigrange<".to_string() + &r.into_lua() + ">",
-        }
-    }
-}
-impl IntoLua for ast::BlockItem {
-    fn into_lua(&self) -> String {
-        match self {
-            BlockItem::Declaration(b) => b.into_lua(),
-            BlockItem::StaticAssert(b) => b.into_lua(),
-            BlockItem::Statement(b) => b.into_lua(),
-        }
-    }
-}
-impl IntoLua for ast::CallExpression {
-    fn into_lua(&self) -> String {
-        "_D[".to_string()
-            + &possible_identifier_quote(&self.callee.to_owned())
-            + "]("
-            + self
-                .arguments
-                .iter()
-                .map(|a| a.into_lua())
-                .collect::<Vec<String>>()
-                .join(", ")
-                .as_str()
-            + ")"
-    }
-}
-impl IntoLua for ast::Constant {
-    fn into_lua(&self) -> String {
-        "____C.Cst(".to_owned()
-            + &(match self {
-                Constant::Integer(i) => match i.base {
-                    IntegerBase::Decimal => i.number.to_string(),
-                    IntegerBase::Binary => {
-                        "tonumber(\"".to_owned() + i.number.clone().into_string().as_str() + "\",2)"
-                    }
-                    IntegerBase::Octal => {
-                        "tonumber(\"".to_owned() + i.number.clone().into_string().as_str() + "\",8)"
-                    }
-                    IntegerBase::Hexadecimal => {
-                        "0x".to_owned() + i.number.clone().into_string().as_str()
-                    }
-                },
-                Constant::Float(f) => match f.base {
-                    FloatBase::Decimal => f.number.to_string(),
-                    FloatBase::Hexadecimal => {
-                        "0x".to_owned() + f.number.clone().into_string().as_str()
-                    }
-                },
-                Constant::Character(c) => c.into(),
-            })
-            + ")"
-    }
-}
-impl IntoLua for ast::MemberOperator {
-    fn into_lua(&self) -> String {
-        match self {
-            MemberOperator::Direct => ".",
-            MemberOperator::Indirect => ".--[[->]]",
-        }
-        .to_string()
-    }
-}
-impl IntoLua for ast::MemberExpression {
-    fn into_lua(&self) -> String {
-        if let MemberOperator::Indirect = self.operator.node {
-            "____C.Deref(".to_owned()
-                + &self.expression.into_lua()
-                + ")."
-                + &self.identifier.into_lua()
-        } else {
-            self.expression.into_lua() + &self.operator.into_lua() + &self.identifier.into_lua()
-        }
-        //"--[[member expression]]".to_string()
-    }
-}
-impl IntoLua for ast::GenericSelection {
-    fn into_lua(&self) -> String {
-        "--[[generic selection]]".to_string()
-    }
-}
-impl IntoLua for ast::CompoundLiteral {
-    fn into_lua(&self) -> String {
-        "--[[compound literal]]".to_string()
-    }
-}
-impl IntoLua for ast::SizeOfTy {
-    fn into_lua(&self) -> String {
-        "____C.SizeOfType('".to_string() + &self.0.into_lua() + "')"
-    }
-}
-impl IntoLua for ast::SizeOfVal {
-    fn into_lua(&self) -> String {
-        "____C.SizeOfValue(".to_string() + &self.0.into_lua() + ")"
-    }
-}
-// impl IntoLua for ast::UnaryOperator {
-//     fn into_lua(&self) -> String {
-//     }
-// }
-impl IntoLua for ast::UnaryOperatorExpression {
-    fn into_lua(&self) -> String {
-        let operand = self.operand.into_lua();
-        match self.operator.node {
-            ast::UnaryOperator::PostIncrement => {
-                "(function()local _=".to_owned()
-                    + &operand
-                    + ";____C.Set("
-                    + &operand
-                    + ","
-                    + &operand
-                    + " + 1);return _ end)()"
-            }
-            ast::UnaryOperator::PostDecrement => {
-                "(function()local _=".to_owned()
-                    + &operand
-                    + ";____C.Set("
-                    + &operand
-                    + ","
-                    + &operand
-                    + " - 1);return _ end)()"
-            }
-            ast::UnaryOperator::PreIncrement => {
-                "(function()____C.Set(".to_owned()
-                    + &operand
-                    + ","
-                    + &operand
-                    + " + 1);return "
-                    + &operand
-                    + ";end)()"
-            }
-            ast::UnaryOperator::PreDecrement => {
-                "(function()____C.Set(".to_owned()
-                    + &operand
-                    + ","
-                    + &operand
-                    + " - 1);return "
-                    + &operand
-                    + ";end)()"
-            }
-            ast::UnaryOperator::Address => "____C.AddressOf(".to_owned() + &operand + ")",
-            ast::UnaryOperator::Indirection => "____C.Ptr(".to_owned() + &operand + ")",
-            ast::UnaryOperator::Plus => operand,
-            ast::UnaryOperator::Minus => "-".to_owned() + &operand,
-            ast::UnaryOperator::Complement => "(~ ".to_owned() + &operand + ")",
-            ast::UnaryOperator::Negate => "(not ".to_owned() + &operand + ")",
-        }
-    }
-}
-impl IntoLua for ast::BinaryOperator {
-    fn into_lua(&self) -> String {
-        // TODO
-        match self {
-            BinaryOperator::Multiply => "*",
-            BinaryOperator::Divide => "/",
-            BinaryOperator::Modulo => "%",
-            BinaryOperator::Plus => "+",
-            BinaryOperator::Minus => "-",
-            BinaryOperator::ShiftLeft => "<<",
-            BinaryOperator::ShiftRight => ">>",
-            BinaryOperator::Less => "<",
-            BinaryOperator::Greater => ">",
-            BinaryOperator::GreaterOrEqual => ">=",
-            BinaryOperator::Equals => "==",
-            BinaryOperator::NotEquals => "~=",
-            BinaryOperator::BitwiseAnd => "&",
-            BinaryOperator::BitwiseOr => "|",
-            BinaryOperator::BitwiseXor => "~",
-            BinaryOperator::LogicalAnd => "and",
-            BinaryOperator::LogicalOr => "or",
-            _ => "%--[[unimpl. binop ]]",
-        }
-        .to_string()
-    }
-}
-impl IntoLua for ast::BinaryOperatorExpression {
-    fn into_lua(&self) -> String {
-        match self.operator.node {
-            BinaryOperator::Index => self.lhs.into_lua() + "[" + &self.rhs.into_lua() + "]",
-            // I think (think) I can change these to not be so space consuming
-            BinaryOperator::Assign => {
-                "____C.Set(".to_owned() + &self.lhs.into_lua() + "," + &self.rhs.into_lua() + ")"
-            }
-            BinaryOperator::AssignMultiply => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " * "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignDivide => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " / "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignModulo => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " % "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignPlus => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " + "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignMinus => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " - "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignShiftLeft => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " << "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignShiftRight => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " >> "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignBitwiseAnd => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " & "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignBitwiseOr => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " | "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-            BinaryOperator::AssignBitwiseXor => {
-                "____C.Set(".to_owned()
-                    + &self.lhs.into_lua()
-                    + ","
-                    + &self.lhs.into_lua()
-                    + " ~ "
-                    + &self.rhs.into_lua()
-                    + ")"
-            }
-
-            // BinaryOperator::Assign => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignMultiply => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " * "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignDivide => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " / "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignModulo => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " % "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignPlus => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " + "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignMinus => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " - "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignShiftLeft => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " << "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignShiftRight => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " >> "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignBitwiseAnd => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " & "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignBitwiseOr => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " | "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            // BinaryOperator::AssignBitwiseXor => {
-            //     "(function() ".to_owned()
-            //         + &self.lhs.into_lua()
-            //         + "="
-            //         + &self.lhs.into_lua()
-            //         + " ~ "
-            //         + &self.rhs.into_lua()
-            //         + " end)()"
-            // }
-            _ => {
-                // "(".to_string()
-                /*  + &*/
-                self.lhs.into_lua()
-                    + " " // )
-                    + &self.operator.into_lua()
-                    + " " // (
-                    + &self.rhs.into_lua()
-                //  + ")"
-            }
-        }
-    }
-}
-impl IntoLua for SpecifierQualifier {
-    fn into_lua(&self) -> String {
-        match self {
-            SpecifierQualifier::TypeSpecifier(t) => get_practical_type(t.clone()),
-            SpecifierQualifier::TypeQualifier(t) => t.into_lua(),
-            // SpecifierQualifier::Extension(_) => todo!(),
-            _ => "--[[umm]]".to_string(),
-        }
-    }
-}
-impl IntoLua for ast::TypeName {
-    fn into_lua(&self) -> String {
-        let mut str = "".to_string();
-        // for spec in self.specifiers.iter().take(self.specifiers.len() - 1) {
-        //     // println!("{:?}", spec);
-        //     if let SpecifierQualifier::TypeSpecifier(t) = &spec.node {
-        //         str.push_str("--[[");
-        //         let luad = get_practical_type(t.clone());
-        //         if self.declarator.is_some() {
-        //             str.push_str(&transform_type(
-        //                 self.declarator.clone().unwrap().node.derived,
-        //                 luad.clone(),
-        //             ));
-        //         } else {
-        //             str.push_str(&luad);
-        //         }
-        //         str.push_str("]]");
-        //     }
-        // }
-        if self.specifiers.last().is_some() {
-            let spec = self.specifiers.last().unwrap();
-            if let SpecifierQualifier::TypeSpecifier(t) = &spec.node {
-                let luad = get_practical_type(t.clone());
-                if self.declarator.is_some() {
-                    str.push_str(&transform_type(
-                        self.declarator.clone().unwrap().node.derived,
-                        luad.clone(),
-                    ));
-                } else {
-                    str.push_str(&luad);
-                }
-            }
-        }
-        str
-    }
-}
-impl IntoLua for ast::CastExpression {
-    fn into_lua(&self) -> String {
-        "(".to_owned() + &self.expression.into_lua() + " as " + &self.type_name.into_lua() + ")"
-    }
-}
-impl IntoLua for ast::ConditionalExpression {
-    fn into_lua(&self) -> String {
-        "(function()if (".to_owned()
-            + &self.condition.into_lua()
-            + ") then return ("
-            + &possible_identifier_quote(&self.then_expression.to_owned())
-            + "); else return ("
-            + &possible_identifier_quote(&self.else_expression.to_owned())
-            + "); end end)()"
-    }
-}
-impl IntoLua for ast::Expression {
-    fn into_lua(&self) -> String {
-        match self {
-            // todo
-            Expression::Identifier(b) => b.into_lua(),
-            Expression::Constant(b) => b.into_lua(),
-            Expression::StringLiteral(b) => {
-                "____C.Str(".to_owned() + &b.node.join("..").into_lua() + ")"
-            }
-            Expression::GenericSelection(s) => s.into_lua(),
-            Expression::Member(m) => m.into_lua(),
-            Expression::Call(b) => b.into_lua(),
-            Expression::CompoundLiteral(c) => c.into_lua(),
-            Expression::SizeOfTy(t) => t.into_lua(),
-            Expression::SizeOfVal(s) => s.into_lua(),
-            Expression::Comma(comm) => {
-                let mut s = "(function()".to_string();
-                for v in comm.iter().take(comm.len() - 1) {
-                    s = s + &v.into_lua() + ";"
-                }
-                s = s + "return (function() " + &comm.last().unwrap().into_lua() + " end)()";
-                s = s + " end)()";
-                s
-            } // "--[[ comma ]]".to_string(),
-            Expression::UnaryOperator(s) => s.into_lua(),
-            Expression::Statement(s) => s.into_lua(),
-            Expression::Cast(s) => {
-                "(function()local _=".to_owned() + &s.into_lua() + ";return _;end)()"
-            }
-            Expression::BinaryOperator(s) => s.into_lua(),
-            Expression::AlignOf(_) => "--[[ align of ]]".to_string(),
-            Expression::Conditional(c) => c.into_lua(),
-            Expression::OffsetOf(_) => "--[[ offset of ]]".to_string(),
-            Expression::VaArg(_) => "--[[ va arg ]]".to_string(), // _ => "(1)--[[EXPRESSION PLACEHOLDER]]".to_string(),
-        }
-    }
-}
-impl IntoLua for ast::CaseRange {
-    fn into_lua(&self) -> String {
-        // tod, who?
-        "--[[CASE RANGE]]".to_string()
-    }
-}
-impl IntoLua for ast::Label {
-    fn into_lua(&self) -> String {
-        match self {
-            Label::Identifier(i) => i.into_lua(),
-            Label::Case(ex) => ex.into_lua(),
-            Label::CaseRange(ex) => ex.into_lua(),
-            Label::Default => "default".to_string(),
-        }
-    }
-}
-impl IntoLua for ast::LabeledStatement {
-    fn into_lua(&self) -> String {
-        "::".to_owned() + &self.label.into_lua() + "::\n" + &self.statement.into_lua()
-    }
-}
-impl IntoLua for ast::IfStatement {
-    fn into_lua(&self) -> String {
-        let mut s = "if (".to_owned() + &self.condition.into_lua() + ") then\n";
-        s.push_str(&indent(self.then_statement.into_lua(), 3));
-        if self.else_statement.is_some() {
-            s.push_str("else\n");
-            s.push_str(&indent(self.else_statement.clone().unwrap().into_lua(), 3));
-        }
-        s.push_str("end");
-        s.to_string()
-    }
-}
-impl IntoLua for ast::WhileStatement {
-    fn into_lua(&self) -> String {
-        "while (".to_owned()
-            + &self.expression.into_lua()
-            + ") do\n"
-            + &indent(self.statement.into_lua() + "\n::continue::", 3)
-            + "\nend"
-    }
-}
-impl IntoLua for ast::DoWhileStatement {
-    fn into_lua(&self) -> String {
-        "repeat\n".to_owned()
-            + &indent(self.statement.into_lua() + "\n::continue::", 3)
-            + "\nuntil not ("
-            + &self.expression.into_lua()
-            + ")"
-    }
-}
-impl IntoLua for ForInitializer {
-    fn into_lua(&self) -> String {
-        match self {
-            ForInitializer::Empty => "".to_string(),
-            ForInitializer::Expression(i) => i.into_lua(),
-            ForInitializer::Declaration(i) => i.into_lua(),
-            ForInitializer::StaticAssert(i) => i.into_lua(),
-        }
-    }
-}
-impl IntoLua for ast::ForStatement {
-    fn into_lua(&self) -> String {
-        let mut str = "-- start for loop\n".to_string();
-        str.push_str(&(self.initializer.into_lua() + "\n"));
-        str.push_str("while ");
-        if self.condition.is_some() {
-            str.push_str(&("(".to_owned() + &self.condition.clone().unwrap().into_lua() + ")"));
-        } else {
-            str.push_str("true");
-        }
-        str.push_str(" do\n");
-        str.push_str(&(indent(self.statement.into_lua(), 3) + "\n"));
-        if self.step.is_some() {
-            str.push_str(
-                &(indent(self.step.clone().unwrap().into_lua() + "\n::continue::", 3) + "\n"),
-            );
-        }
-        str.push_str("end");
-        str
-    }
-}
-fn semicolonize(str: String) -> String {
-    if str.trim_end().ends_with(";") | str.trim().is_empty() {
-        str
-    } else {
-        // println!("{} -> {}", str, str.trim().is_empty());
-        str + ";"
-    }
-}
-impl IntoLua for ast::Statement {
-    fn into_lua(&self) -> String {
-        semicolonize(match self {
-            Statement::Labeled(t) => t.into_lua(),
-            Statement::Compound(t) => t
-                .iter()
-                .map(|b| b.into_lua())
-                .collect::<Vec<String>>()
-                .join("\n"),
-            Statement::Expression(t) => {
-                if t.is_some() {
-                    t.as_ref().unwrap().into_lua()
-                } else {
-                    "".to_string()
-                }
-            }
-            Statement::If(t) => t.into_lua(),
-            // Statement::Switch(t) => t.into_lua(),
-            Statement::While(t) => t.into_lua(),
-            Statement::DoWhile(t) => t.into_lua(),
-            Statement::For(t) => t.into_lua(),
-            Statement::Goto(t) => "goto ".to_owned() + &t.into_lua(),
-            // Statement::Asm(t) => t.into_lua(),
-            Statement::Return(t) => {
-                if t.is_some() {
-                    "do return (".to_owned() + t.as_ref().unwrap().into_lua().as_str() + ") end"
-                } else {
-                    "do return end".to_string()
-                }
-            }
-            Statement::Continue => "goto continue".to_string(),
-            Statement::Break => "break".to_string(),
-            _ => "--[[ unhandled statement ]]".to_string(),
-            //_ => format!("--[[{:?}]]", self),
-        }) + "\n"
-    }
-}
-impl IntoLua for ast::Identifier {
-    fn into_lua(&self) -> String {
-        let keywords = [
-            "while", "for", "do", "if", "repeat", "until", "end", "break", "then", "else", "elseif",
-        ];
-        let mut s = self.name.clone();
-        if keywords.contains(&s.as_str()) {
-            s = "_______________".to_owned().to_owned() + &s // I mean, it'll work...
-        };
-        s
-    }
-}
-impl IntoLua for ast::StructKind {
-    fn into_lua(&self) -> String {
-        match self {
-            StructKind::Struct => "--[[struct]]".to_string(),
-            StructKind::Union => "--[[union]]".to_string(),
-        }
-    }
-}
-impl IntoLua for ast::StructType {
-    fn into_lua(&self) -> String {
-        if self.identifier.is_some() {
-            self.kind.into_lua() + &self.identifier.clone().unwrap().into_lua()
-        } else {
-            self.kind.into_lua()
-        }
-        // declarations don't matter!!!!
-    }
-}
-impl IntoLua for ast::Enumerator {
-    fn into_lua(&self) -> String {
-        // TODO: the expressions that come with this
-        self.identifier.into_lua()
-    }
-}
-impl IntoLua for ast::EnumType {
-    fn into_lua(&self) -> String {
-        if self.identifier.is_some() {
-            let mut number = 0;
-            "local enum ".to_owned()
-                + &self.identifier.clone().unwrap().into_lua()
-                + "\n"
-                + &indent(
-                    self.enumerators
-                        .iter()
-                        .map(|x| "\"".to_string() + &x.into_lua() + "\"")
-                        .collect::<Vec<String>>()
-                        .join("\n"),
-                    3,
-                )
-                + "end\n"
-                // + "local "
-                + &self
-                    .enumerators
-                    .iter()
-                    .map(|x| x.into_lua())
-                    .collect::<Vec<String>>()
-                    .join(",")
-                + " = "
-                + &self
-                    .enumerators
-                    .iter()
-                    .map(|x| {
-                        if x.node.expression.is_some() {
-                            x.node.expression.clone().unwrap().into_lua()
-                        } else {
-                            number = number + 1;
-                            (number - 1).to_string()
-                        }
-                    })
-                    .collect::<Vec<String>>()
-                    .join(", ")
-        } else {
-            "--[[one enum, no identifier, please]]".to_string()
-        }
-    }
-}
-impl IntoLua for ast::TypeSpecifier {
-    fn into_lua(&self) -> String {
-        match self {
-            TypeSpecifier::Void => "void".to_string(),
-            TypeSpecifier::Char => "char".to_string(),
-            TypeSpecifier::Short => "short".to_string(),
-            TypeSpecifier::Int => "int".to_string(),
-            TypeSpecifier::Long => "long".to_string(),
-            TypeSpecifier::Float => "float".to_string(),
-            TypeSpecifier::Double => "double".to_string(),
-            TypeSpecifier::Signed => "signed".to_string(),
-            TypeSpecifier::Unsigned => "unsigned".to_string(),
-            TypeSpecifier::Bool => "bool".to_string(),
-            TypeSpecifier::Complex => "complex".to_string(),
-            TypeSpecifier::Struct(d) => d.into_lua(),
-            TypeSpecifier::TypedefName(i) => i.into_lua(),
-            TypeSpecifier::Enum(t) => t.into_lua(),
-            _ => "nil--[[unimpl. type spec]]".to_string(),
-        }
-    }
-}
-impl IntoLua for ast::Attribute {
-    fn into_lua(&self) -> String {
-        self.name.node.to_owned()
-            + "("
-            + &self
-                .arguments
-                .iter()
-                .map(|x| x.into_lua())
-                .collect::<Vec<String>>()
-                .join(", ")
-            + ")"
-    }
-}
-impl IntoLua for ast::AvailabilityVersion {
-    fn into_lua(&self) -> String {
-        let mut s = "v".to_owned() + &self.major.clone();
-        if self.minor.is_some() {
-            s = s + &self.minor.clone().unwrap()
-        }
-        if self.subminor.is_some() {
-            s = s + &self.subminor.clone().unwrap()
-        }
-        s
-    }
-}
-impl IntoLua for ast::AvailabilityClause {
-    fn into_lua(&self) -> String {
-        match self {
-            ast::AvailabilityClause::Introduced(ver) => "I".to_owned() + &ver.into_lua(),
-            ast::AvailabilityClause::Deprecated(ver) => "D".to_owned() + &ver.into_lua(),
-            ast::AvailabilityClause::Obsoleted(ver) => "O".to_owned() + &ver.into_lua(),
-            ast::AvailabilityClause::Unavailable => "U".to_string(),
-            ast::AvailabilityClause::Message(ve) => "M{".to_owned() + &ve.node.join(",") + "}",
-            ast::AvailabilityClause::Replacement(ve) => "R{".to_owned() + &ve.node.join(",") + "}",
-        }
-    }
-}
-impl IntoLua for ast::AvailabilityAttribute {
-    fn into_lua(&self) -> String {
-        self.platform.into_lua()
-            + ": "
-            + &self
-                .clauses
-                .iter()
-                .map(|x| x.into_lua())
-                .collect::<Vec<String>>()
-                .join(",")
-    }
-}
-impl IntoLua for ast::Extension {
-    fn into_lua(&self) -> String {
-        match self {
-            ast::Extension::Attribute(attr) => "Attribute(".to_owned() + &attr.into_lua() + ")",
-            ast::Extension::AsmLabel(sv) => {
-                "AsmLabel(".to_owned()
-                    + &sv
-                        .node
-                        .iter()
-                        .map(|x| x.into_lua())
-                        .collect::<Vec<String>>()
-                        .join(",")
-                    + ")"
-            }
-            ast::Extension::AvailabilityAttribute(av) => {
-                "Availability(".to_owned() + &av.into_lua() + ")"
-            }
-        }
-    }
-}
-impl IntoLua for ast::StructDeclaration {
-    fn into_lua(&self) -> String {
-        match self {
-            StructDeclaration::Field(_) => "--[[field]]".to_string(),
-            StructDeclaration::StaticAssert(_) => "--[[assert]]".to_string(),
-        }
-    }
-}
-// impl IntoLua for ast::DeclarationSpecifier {
-//     fn into_lua(&self) -> String {
-//     }
-// }
-impl IntoLua for ast::TypeQualifier {
-    fn into_lua(&self) -> String {
-        match self {
-            TypeQualifier::Const => "const",
-            TypeQualifier::Restrict => "restrict",
-            TypeQualifier::Volatile => "volatile",
-            TypeQualifier::Nonnull => "nonnull",
-            TypeQualifier::NullUnspecified => "nullunspec",
-            TypeQualifier::Nullable => "nullable",
-            TypeQualifier::Atomic => "atomic",
-        }
-        .to_string()
-    }
-}
-fn transform_type<T: IntoLua>(deriv: Vec<Node<DerivedDeclarator>>, var: T) -> String {
-    let mut s = var.into_lua();
-    let mut to_apply = Vec::new();
-    for v in deriv.iter() {
-        if let DerivedDeclarator::Array(_) = v.node {
-            to_apply.push(v);
-        }
-    }
-    for v in deriv.iter() {
-        if let DerivedDeclarator::Pointer(_) = v.node {
-            to_apply.push(v);
-        }
-    }
-    for v in to_apply.iter() {
-        match &v.node {
-            DerivedDeclarator::Array(dec) => match dec.node.clone().size {
-                ArraySize::Unknown => s = "{".to_owned() + &s + "}",
-                ArraySize::VariableUnknown => s = "{".to_owned() + &s + "}--[[variable unknown]]",
-                ArraySize::VariableExpression(_) => s = "{".to_owned() + &s + "}",
-                ArraySize::StaticExpression(_) => s = "{".to_owned() + &s + "}",
-            },
-            DerivedDeclarator::Pointer(pq) => {
-                let mut ptr_names: Vec<&str> = Vec::with_capacity(7); // 7 type qualifiers
-                for _ in 0..7 {
-                    ptr_names.push("");
-                }
-                for p in pq.iter() {
-                    if let PointerQualifier::TypeQualifier(tq) = &p.node {
-                        match tq.node {
-                            TypeQualifier::Const => ptr_names[6] = "C",
-                            TypeQualifier::Restrict => {
-                                ptr_names[5] = "R";
-                            }
-                            TypeQualifier::Volatile => {
-                                ptr_names[4] = "V";
-                            }
-                            TypeQualifier::Nonnull => {
-                                ptr_names[3] = "N";
-                            }
-                            TypeQualifier::NullUnspecified => {
-                                ptr_names[2] = "U";
-                            }
-                            TypeQualifier::Nullable => {
-                                ptr_names[1] = "B";
-                            }
-                            TypeQualifier::Atomic => {
-                                ptr_names[0] = "A";
-                            } //_ => {}
-                        }
-                    }
-                }
-                ptr_names = ptr_names
-                    .iter()
-                    .cloned()
-                    .filter(|x| !x.is_empty())
-                    .collect::<Vec<&str>>();
-                if ptr_names.len() > 0 {
-                    s = ptr_names.concat() + "_Ptr<" + &s + ">";
-                } else {
-                    s = "Ptr<".to_owned() + &s + ">";
-                }
-            }
-            _ => {}
-        }
-    }
-    s
-}
-impl IntoLua for ast::ParameterDeclaration {
-    fn into_lua(&self) -> String {
-        let mut s = "".to_string();
-        if self.declarator.is_some() && !self.declarator.clone().unwrap().into_lua().is_empty() {
-            // declarator has the derived stuff
-            // specifier has the type name
-            // current bug: ends up with "a: <const>,: realType<aaa>"
-            s = self.declarator.clone().unwrap().into_lua();
-        }
-        let mut iter = self
-            .specifiers
-            .iter()
-            .filter(|x| !x.into_lua().trim().is_empty());
-        let mut first = true;
-        // let mut temp = "".to_string();
-        'outer: loop {
-            if first {
-                first = false;
-            } else {
-                break;
-                // s.push_str(", ");
-            }
-            let mut v;
-            {
-                let a = iter.next();
-                if a.is_none() {
-                    break;
-                }
-                v = a.unwrap();
-                if v.into_lua().is_empty() | v.into_lua().trim().is_empty() {
-                    continue;
-                }
-            }
-            // guaranteed to not be a type qualifier
-            // s.push_str("--[[");
-            // s.push_str(&format!("{:?}", v));
-            // s.push_str("]]");
-            if let DeclarationSpecifier::TypeQualifier(_) = &v.node {
-                // println!("{:?}", t);
-                // s.push_str(&("--[[".to_owned() + &t.into_lua() + "]]"));
-                loop {
-                    {
-                        let a = iter.next();
-                        if a.is_none() {
-                            break 'outer;
-                        }
-                        v = a.unwrap();
-                        if v.into_lua().is_empty() | v.into_lua().trim().is_empty() {
-                            continue;
-                        }
-                    }
-                    if let DeclarationSpecifier::TypeQualifier(_) = &v.node {
-                        // s.push_str(&t.into_lua());
-                    } else {
-                        break;
-                    }
-                }
-            }
-            if !v.node.into_lua().trim().is_empty() & self.declarator.is_some() {
-                s.push_str(": ");
-                s.push_str(&transform_type(
-                    self.declarator.clone().unwrap().node.derived,
-                    v.node.clone(),
-                ));
-            }
-        }
-        // s.truncate(s.len() - 2);
-        s
-        // self.specifiers
-        //     .iter()
-        //     .map(|a| {
-        //         ": ".to_owned()
-        //             + &transform_type(
-        //                 self.declarator.clone().unwrap().node.derived,
-        //                 a.node.clone(),
-        //             )
-        //     })
-        //     .collect::<Vec<String>>()
-        //     .join(",")
-        //     .as_str()
-        // } else {
-        //     self.specifiers
-        //         .iter()
-        //         .map(|a| a.into_lua())
-        //         .collect::<Vec<String>>()
-        //         .join(",")
-        // }
-    }
-}
-impl IntoLua for ast::FunctionDeclarator {
-    fn into_lua(&self) -> String {
-        self.parameters
-            .clone()
-            .iter()
-            // .filter(|x| !x.node.declarator.is_none())
-            .map(|a| a.into_lua())
-            .filter(|x| !x.trim().is_empty())
-            .collect::<Vec<String>>()
-            .join(", ")
-            + {
-                if self.ellipsis == Ellipsis::Some {
-                    ", ..."
-                } else {
-                    ""
-                }
-            }
-        // "--[[(function declarator)]]".to_string()
-    }
-}
-impl IntoLua for ast::DeclaratorKind {
-    fn into_lua(&self) -> String {
-        match self {
-            DeclaratorKind::Abstract => "ABSTRACT".to_string(),
-            DeclaratorKind::Identifier(b) => b.into_lua(),
-            DeclaratorKind::Declarator(b) => b.into_lua(),
-        }
-    }
-}
-impl IntoLua for ast::Declarator {
-    fn into_lua(&self) -> String {
-        // println!("{:?}\n", self);
-        // let mut s: String = "Aaa".to_string();
-        // s
-        self.kind.into_lua()
-    }
-}
-impl IntoLua for ast::DerivedDeclarator {
-    fn into_lua(&self) -> String {
-        // todo!("extremely todo")
-        // println!("{:?}", self);
-        match self {
-            DerivedDeclarator::Pointer(k) => {
-                if k.len() > 0 {
-                    k.iter().for_each(|a| println!("{:?}", a));
-                    "--[[".to_owned() + ("*".to_owned().repeat(k.len()).as_str()) + "]]"
-                } else {
-                    "".to_string()
-                }
-            }
-            DerivedDeclarator::Array(_) => "--[[umm array]]".to_string(),
-            DerivedDeclarator::Function(k) => k.into_lua(),
-            DerivedDeclarator::KRFunction(k) => {
-                "function(".to_owned()
-                    + &k.iter()
-                        .map(|x| x.into_lua())
-                        .collect::<Vec<String>>()
-                        .join(", ")
-                    + ")"
-            }
-            DerivedDeclarator::Block(_) => "--[[umm block]]".to_string(),
-            //_ => format!("--[[{:?}]]", self).to_owned(),
-        }
-    }
-}
-impl IntoLua for ast::InitDeclarator {
-    fn into_lua(&self) -> String {
-        self.declarator.into_lua()
-    }
-}
-impl IntoLua for ast::InitializerListItem {
-    fn into_lua(&self) -> String {
-        self.initializer.node.into_lua()
-        // + "\n-- designators: "
-        // + &self
-        //     .designation
-        //     .iter()
-        //     .map(|x| x.into_lua())
-        //     .collect::<Vec<String>>()
-        //     .join(", ")
-    }
-}
-impl IntoLua for ast::Initializer {
-    fn into_lua(&self) -> String {
-        match self {
-            Initializer::Expression(b) => b.into_lua(),
-            Initializer::List(b) => {
-                "____C.List({\n".to_owned()
-                    + &indent(
-                        b.iter()
-                            .map(|x| x.into_lua())
-                            .collect::<Vec<String>>()
-                            .join(";\n"),
-                        3,
-                    )
-                    + "})"
-            }
-        }
-    }
-}
-impl IntoLua for ast::Declaration {
-    fn into_lua(&self) -> String {
-        // todo!("implement this...");
-        if self.declarators.len() == 0 {
-            for x in self.specifiers.iter() {
-                if let DeclarationSpecifier::TypeSpecifier(k) = &x.node {
-                    if let TypeSpecifier::Enum(e) = &k.node {
-                        return e.node.into_lua();
-                    }
-                }
-            }
-            return "--[[no declaration specifier, and len was 0]]".to_string();
-        }
-        self.declarators
-            .iter()
-            .map(|x| {
-                let val = {
-                    if x.node.initializer.is_some() {
-                        x.node.initializer.clone().unwrap().into_lua()
-                    // } else if let DeclaratorKind::Identifier(t) = &a.node.declarator.node.kind.node {
-                    //     t.into_lua()
-                    } else {
-                        "____C.Uninitialized()".to_string()
-                    }
-                };
-                "local ".to_string() + &x.into_lua() + " = " + &val
-            })
-            .collect::<Vec<String>>()
-            .join("; ")
-            + ";"
-        // "local ".to_string()+&self.declarators
-        //     .iter()
-        //     .map(|b|b.into_lua())
-        //     .collect::<Vec<String>>()
-        //     .join(", ")
-        //     // + "--[["
-        //     // TODO: types on these variables!
-        //     // + ": "
-        //     // + &self.declarators.iter().map(|b|{
-        //     //     transform_type(
-        //     //         b.node.declarator.node.derived.clone(),
-        //     //         b.node.declarator.node.derived.iter().map(|x|x.into_lua()).collect::<Vec<String>>().join(", "))
-        //     // }).into_iter().collect::<Vec<String>>().join(", ")
-        //     + " = "
-        //     + &self
-        //         .declarators
-        //         .iter()
-        //         .map(|a| {
-        //             if a.node.initializer.is_some() {
-        //                 a.node.initializer.clone().unwrap().into_lua()
-        //             // } else if let DeclaratorKind::Identifier(t) = &a.node.declarator.node.kind.node {
-        //             //     t.into_lua()
-        //             } else {
-        //                 "____C.Uninitialized()".to_string()
-        //             }
-        //         })
-        //         .collect::<Vec<String>>()
-        //         .join(", ")+";"
-        // // + "]]"
-        // // "".to_string()
-    }
-}
-impl IntoLua for ast::StaticAssert {
-    fn into_lua(&self) -> String {
-        // println!("{:?}\n", self);
-        // todo!("impl this 2");
-        "--[[static assert ".to_string()
-            + &self.expression.into_lua()
-            + " -> "
-            + &self
-                .message
-                .node
-                .iter()
-                .map(|x| x.into_lua())
-                .collect::<Vec<String>>()
-                .join(" + ")
-            + "]]"
-    }
-}
-impl IntoLua for ast::FunctionDefinition {
-    fn into_lua(&self) -> String {
-        // println!("{:?}\n", self);
-        // todo!("trait this 3");
-        let mut str = "function _D.".to_owned();
-        str.push_str(self.declarator.into_lua().as_str());
-        str.push('(');
-        str.push_str(
-            self.declarator
-                .node
-                .derived
-                .clone()
-                .into_iter()
-                .filter(|x| {
-                    if let DerivedDeclarator::KRFunction(_) = &x.node {
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .map(|b| b.into_lua())
-                .filter(|x| !x.is_empty())
-                .collect::<Vec<String>>()
-                .join(", ")
-                .as_str(),
-        );
-        str.push(')');
-        if self.specifiers.len() > 0 {
-            str.push_str(": ");
-            let mut has_others = false;
-            for spec in self.specifiers.iter() {
-                if let DeclarationSpecifier::TypeSpecifier(_) = &spec.node {
-                    str.push_str(&spec.into_lua());
-                } else if !has_others {
-                    has_others = true
-                }
-            }
-            if has_others {
-                str.push_str(" --");
-                for spec in self.specifiers.iter() {
-                    // how do I invert this?
-                    if let DeclarationSpecifier::TypeSpecifier(_) = &spec.node {
-                    } else {
-                        str.push_str(&spec.into_lua());
-                    }
-                }
-            }
-            str.push_str("\n");
-        }
-        str.push_str(indent(self.statement.into_lua(), 3).as_str());
-        str.push_str("end;");
-        str.push_str(self.declarator.into_lua().as_str());
-        str.push_str("=_D['");
-        str.push_str(self.declarator.into_lua().as_str());
-        str.push_str("']");
-        str
-    }
-}
-
-impl IntoLua for ast::DeclarationSpecifier {
-    fn into_lua(&self) -> String {
-        match self {
-            // NOTE: storage class serves NO purpose to me
-            DeclarationSpecifier::StorageClass(_s) => "".to_string(), //"--[[dspec storage class]]".to_string(),
-            DeclarationSpecifier::TypeSpecifier(s) => get_practical_type(s.clone()),
-            DeclarationSpecifier::TypeQualifier(s) => s.into_lua(), //"--[[dspec type qualifier]]".to_string(),
-            DeclarationSpecifier::Function(s) => match s.node {
-                FunctionSpecifier::Noreturn => "function(...: unknown)".to_string(),
-                FunctionSpecifier::Inline => "function(...: unknown)".to_string(),
-            }, //"--[[dspec function]]".to_string(),
-            DeclarationSpecifier::Alignment(_s) => "--[[dspec alignment]]".to_string(),
-            DeclarationSpecifier::Extension(_s) => {
-                "--[[extension]]".to_string() /*"--[[ext: ".to_owned()
-                                              + &s.iter()
-                                                  .map(|x| x.into_lua())
-                                                  .collect::<Vec<String>>()
-                                                  .join(", ")
-                                              + "]]"*/
-            } //_ => "--[[decl. specifier]]".to_string(),
-        }
-    }
-}
-impl IntoLua for ast::ExternalDeclaration {
-    fn into_lua(&self) -> String {
-        match self {
-            ast::ExternalDeclaration::Declaration(b) => {
-                if !b.into_lua().is_empty() {
-                    if b.node.declarators.len() == 0 {
-                        return b.into_lua();
-                    }
-                    b.node.declarators
-                        .iter()
-                        .map(|b|b.into_lua())
-                        .collect::<Vec<String>>()
-                        .join(", ")
-                        // + "--[["
-                        // TODO: types on these variables!
-                        // + ": "
-                        // + &b.node.declarators.iter().map(|b|{
-                        //     transform_type(
-                        //         b.node.declarator.node.derived.clone(),
-                        //         b.node.declarator.node.derived.iter().map(|x|x.into_lua()).collect::<Vec<String>>().join(", "))
-                        // }).into_iter().collect::<Vec<String>>().join(", ")
-                        + " = "
-                        + &b.node
-                            .declarators
-                            .iter()
-                            .map(|a| {
-                                if a.node.initializer.is_some() {
-                                    a.node.initializer.clone().unwrap().into_lua()
-                                } else if let DeclaratorKind::Identifier(t) = &a.node.declarator.node.kind.node {
-                                    "_D['".to_string()+&t.into_lua()+"']"
-                                } else {/*a.into_lua()+" or "+*/"_D['".to_string()+&a.into_lua()+"']"+" or ____C.Uninitialized()--[[maybe]]"}
-                            })
-                            .collect::<Vec<String>>()
-                            .join(", ")+";"
-                } else {
-                    "--[[ ".to_string() + &format!("{:?}", b.node) + "]]"
-                }
-            }
-            ast::ExternalDeclaration::StaticAssert(b) => {
-                "--(ASSERT) local ".to_owned() + &b.into_lua() + "=" + &b.into_lua() + ";"
-            }
-            ast::ExternalDeclaration::FunctionDefinition(b) => b.into_lua(),
-        }
-    }
-}
 use clap::Parser;
 use clio::*;
+use lang_c::ast::{
+    BlockItem, Constant, Declaration, DeclarationSpecifier, Declarator, DeclaratorKind, Expression,
+    ExternalDeclaration, FunctionDefinition, ParameterDeclaration, Statement, TS18661FloatType,
+    TranslationUnit, TypeSpecifier,
+};
+use std::{
+    borrow::{Borrow, Cow},
+    cell::{Cell, RefCell},
+    ops::Deref,
+    sync::Mutex,
+};
 #[derive(Parser)]
 #[clap(name = "lilac")]
 struct Args {
     #[clap(value_parser, default_value = "-")]
-    input: Vec<Input>,
-    #[clap(long, short, value_parser, default_value = "a.out")]
-    output: Output,
-    #[clap(short)]
-    c: bool,
-    #[clap(short)]
-    l: Vec<String>,
-    #[clap(short = 'O')]
-    optimize: Option<u8>,
-    #[clap(short = 'W')]
-    warn: Vec<String>,
-    #[clap(short = 'D')]
-    define: Vec<String>,
-    #[clap(short = 'I', long = "include")]
-    include: Vec<String>,
-    #[clap(short = 'r', long = "linker-arg")]
-    linker: Vec<String>,
-    #[clap(short = 's', long = "std")]
-    std: Option<String>,
-}
-fn handle_file(file: &str, cfg: &Config) -> std::result::Result<String, ()> {
-    let mut s = "".to_string();
-    s = s
-        + "--FILE "
-        + file
-        + "\n---@diagnostic disable: lowercase-global\nlocal _D = (____C and ____C.env) or {};\n";
-    let result = parse(&cfg, file);
-    if result.is_err() {
-        print!("{}", result.err().unwrap());
-        return Err(());
-    }
-    for node in result.unwrap().unit.0.iter() {
-        s = s + &format!(
-            "{}\n",
-            // this doesn't work!!!
-            // I don't know why!!!
-            // it _should_ work, but it's not.
-            // and I can't really debug it any better.
-            node.into_lua()
-                .split("\n")
-                .filter(|&b| { !b.trim().is_empty() })
-                .collect::<Vec<&str>>()
-                .join("\n")
-        )
-    }
-    s = s + "return _D;";
-    Ok(s)
+    input: Input,
+    // #[clap(long, short, value_parser, default_value = "a.out")]
+    // output: Output,
 }
 
-fn main() -> std::result::Result<(), std::io::Error> {
+trait Instantiatable {}
+trait Variable<T> {
+    fn get(&self) -> T;
+    fn set(&mut self, v: T);
+}
+#[derive(Clone, Debug)]
+struct Array {}
+impl Instantiatable for Array {}
+#[derive(Clone, Debug)]
+struct Enum {}
+impl Instantiatable for Enum {}
+#[derive(Clone, Debug)]
+struct Struct {}
+impl Instantiatable for Struct {}
+#[derive(Clone, Debug)]
+struct Function {
+    arguments: Vec<(String, Type)>,
+    return_type: Box<Type>,
+}
+// trait Operatable {
+//     fn subscript(&self, k: &str) -> IValue; // a[b], deref then access (takes array + integer/enum variant, gives array subtype)
+//     fn indirection(&self) -> IValue; // *a, deref (takes prvalue, gives ivalue)  deref void errors
+//     fn address_of(&self) -> PRValue; // &a, ref (takes any, gives prvalue)
+//     fn member(&self, k: &str) -> IValue; // a.b, access (takes ivalue+ivalue, gives any)
+//     fn member_indirect(&self, k: &str) -> IValue; // a->b, deref then access (takes prvalue+ivalue, gives any)
+//     fn member_pointer(&self, k: &str) -> IValue; // a.*b, deref member, then access (takes ivalue+prvalue, gives any)
+//     fn member_indirect_pointer(&self, k: &str) -> IValue; // a->*b, deref both, then access (takes prvalue+prvalue, gives any)
+// }
+#[derive(Clone, Debug)]
+enum Type {
+    Void,
+    Char(bool),
+    Int(bool), // bool is signed/unsigned
+    Short(bool),
+    Long(bool),
+    Float,
+    Double,
+    Bool,
+
+    Alias((String, Box<Type>)),
+    Array((String, Array)),
+    Enum((String, Enum)),
+    Struct((String, Struct)),
+    Function((String, Function)),
+}
+// there HAS to be a better way...
+macro_rules! get_type_name {
+    ($var:expr) => {
+        match $var {
+            Type::Void => ("Void"),
+            Type::Char(_) => ("Char"),
+            Type::Int(_) => ("Int"),
+            Type::Short(_) => ("Short"),
+            Type::Long(_) => ("Long"),
+            Type::Float => ("Float"),
+            Type::Double => ("Double"),
+            Type::Bool => ("Bool"),
+            Type::Alias(t) => (t.0.as_str()),
+            Type::Array(t) => (t.0.as_str()),
+            Type::Enum(t) => (t.0.as_str()),
+            Type::Struct(t) => (t.0.as_str()),
+            Type::Function(t) => (t.0.as_str()),
+            // _ => None,
+        }
+    };
+}
+#[derive(Clone)]
+struct IValue<T: Instantiatable + Copy> {
+    offset: Option<i32>,
+    basetype: T,
+    val: Cell<T>,
+}
+impl<T: Instantiatable + Copy> Variable<T> for IValue<T> {
+    fn get(&self) -> T {
+        return self.val.clone().into_inner();
+    }
+
+    fn set(&mut self, v: T) {
+        self.val.set(v);
+    }
+}
+struct PRValue<T: Instantiatable + Copy> {
+    offset: i32,
+    basetype: T,
+    iv: IValue<T>,
+}
+
+struct State<'a> {
+    output: &'a mut String,
+    src: &'a Vec<BlockItem>,
+    types: &'a mut Vec<Type>,
+    variables: &'a mut Vec<&'a dyn Instantiatable>,
+    strtab: &'a Mutex<Vec<(String, Type)>>,
+    // variables: Vec<&'a dyn Instantiatable>,
+    // parent: Option<Box<&'a State<'a>>>,
+}
+trait StateInto<T> {
+    fn state_into(self, state: &State) -> T;
+}
+// tri-state area!!!!
+trait TryStateInto<T> {
+    type Error;
+    fn try_state_into(self, state: &State) -> std::result::Result<T, Self::Error>;
+}
+impl<T, B> StateInto<Vec<B>> for Vec<T>
+where
+    T: StateInto<B> + Copy,
+{
+    fn state_into(self, state: &State) -> Vec<B> {
+        self.iter().map(|x| x.state_into(state)).collect()
+    }
+}
+impl<T, S> TryStateInto<T> for S
+where
+    S: StateInto<T>,
+{
+    type Error = ();
+    fn try_state_into(self, state: &State) -> std::result::Result<T, Self::Error> {
+        Ok(self.state_into(state))
+    }
+}
+impl<T, B> StateInto<B> for lang_c::span::Node<T>
+where
+    T: StateInto<B>,
+{
+    fn state_into(self, state: &State) -> B {
+        self.node.state_into(state)
+    }
+}
+
+fn declaration_to_lua(decl: Declaration, state: &State) -> String {
+    // println!("declaration specifiers {:?}", decl.specifiers);
+    // println!("declaration declarators {:?}", decl.declarators);
+    let binding = decl
+        .specifiers
+        .iter()
+        .filter_map(|x| match x.node.clone() {
+            DeclarationSpecifier::TypeSpecifier(ts2) => Some(ts2.node),
+            _ => None,
+        })
+        .collect::<Vec<TypeSpecifier>>();
+    let ts = binding
+        .first()
+        .expect("The declaration should have a type specifier.");
+    let ty = ts.clone().try_state_into(state).unwrap();
+    let binding2 = decl
+        .declarators
+        .iter()
+        .filter_map(|x| match x.node.clone().declarator.node.kind.node {
+            DeclaratorKind::Identifier(id) => Some(id.node.name),
+            _ => None,
+        })
+        .collect::<Vec<String>>();
+    let id = binding2
+        .first()
+        .expect("There should be an identifier with this declarator.");
+    return "local ".to_string() + id.as_str() + type_into_comment(ty, false).as_str() + ";";
+}
+fn declarator_to_lua<'a>(declarator: Declarator, state: &State) -> String {
+    let id = match declarator.kind.node {
+        DeclaratorKind::Abstract => todo!(),
+        DeclaratorKind::Identifier(id) => id.node.name,
+        DeclaratorKind::Declarator(_) => todo!(),
+    };
+    let mut typedef = "nil".to_string();
+    for decl in declarator.derived {
+        match decl.node {
+            lang_c::ast::DerivedDeclarator::Pointer(p) => typedef = "*".to_string() + id.as_str(),
+            lang_c::ast::DerivedDeclarator::Function(f) => {
+                typedef = "{type='function',parameters={".to_string()
+                    + f.node
+                        .parameters
+                        .iter()
+                        .map(|x| {
+                            typetostring(
+                                x.node
+                                    .specifiers
+                                    .iter()
+                                    .filter_map(|y| match y.node.clone() {
+                                        DeclarationSpecifier::TypeSpecifier(s) => Some(s.node),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<TypeSpecifier>>()
+                                    .first()
+                                    .unwrap()
+                                    .clone()
+                                    .try_state_into(state)
+                                    .unwrap(),
+                            )
+                        })
+                        .map(|x| "'".to_string() + x.as_str() + "'")
+                        .collect::<Vec<String>>()
+                        .join(",")
+                        .as_str()
+                    + "},variadic="
+                    + match f.node.ellipsis {
+                        lang_c::ast::Ellipsis::Some => "true",
+                        lang_c::ast::Ellipsis::None => "false",
+                    }
+                    + ",size=1}"
+            }
+            _ => {
+                println!("unimpl {:?}", decl.node);
+                todo!()
+            }
+        }
+    }
+    "_imports['".to_string() + id.as_str() + "'] = " + typedef.as_str() + ";"
+}
+fn constant_to_lua(constant: Constant) -> String {
+    match constant {
+        Constant::Integer(i) => {
+            let prefix = match i.base {
+                lang_c::ast::IntegerBase::Decimal => "",
+                lang_c::ast::IntegerBase::Hexadecimal => "0x",
+                lang_c::ast::IntegerBase::Binary => "0b",
+                _ => todo!(),
+            };
+            (prefix.to_string() + i.number.borrow())
+            // + "--[["
+            // + (if i.suffix.unsigned { "U" } else { "" })
+            // + {
+            //     match i.suffix.size {
+            //         lang_c::ast::IntegerSize::Int => "Int",
+            //         lang_c::ast::IntegerSize::Long => "Long",
+            //         lang_c::ast::IntegerSize::LongLong => "LongLong",
+            //     }
+            // }
+            // + "]]")
+        }
+        Constant::Float(_) => todo!(),
+        Constant::Character(_) => todo!(),
+    }
+}
+fn expression_to_lua<'a>(expression: Expression, state: &'a State) -> String {
+    match expression {
+        Expression::Identifier(i) => i.node.name,
+        Expression::Constant(cst) => constant_to_lua(cst.node),
+        Expression::StringLiteral(l) => {
+            let content = l.node.join("\n");
+            let locked = state.strtab.lock().unwrap();
+            let cloned = locked.clone();
+            std::mem::drop(locked);
+            let mut found = cloned
+                .iter()
+                .enumerate()
+                .find(|x| x.1 .0 == content)
+                .and_then(|x| Some(x.0));
+            if found.is_none() {
+                let mut strtab = state.strtab.lock().unwrap();
+                // .expect("The strtab shouldn't be mutable borrowed at this point");
+                let val = (
+                    content,
+                    Type::Array((
+                        "stringliteral".to_string() + strtab.len().to_string().as_str(),
+                        Array {},
+                    )),
+                );
+                strtab.push(val);
+                let len = strtab.len();
+                std::mem::drop(strtab);
+                found = Some(len)
+            }
+            "_strtab[".to_string() + found.unwrap().to_string().as_str() + "]"
+        }
+        Expression::GenericSelection(_) => todo!(),
+        Expression::Member(_) => todo!(),
+        Expression::Call(c) => {
+            (match c.node.callee.node {
+                Expression::Identifier(i) => {
+                    "_namespace['".to_string() + i.node.name.as_str() + "']"
+                }
+                _ => expression_to_lua(c.node.callee.node, state),
+            }) + "("
+                + (c.node
+                    .arguments
+                    .iter()
+                    .map(|x| expression_to_lua(x.node.clone(), state))
+                    .collect::<Vec<String>>()
+                    .join(", ")
+                    .as_str())
+                + ")"
+        }
+        Expression::CompoundLiteral(_) => todo!(),
+        Expression::SizeOfTy(_) => todo!(),
+        Expression::SizeOfVal(_) => todo!(),
+        Expression::AlignOf(_) => todo!(),
+        Expression::UnaryOperator(_) => todo!(),
+        Expression::Cast(_) => todo!(),
+        Expression::BinaryOperator(b) => match b.node.clone().operator.node {
+            lang_c::ast::BinaryOperator::Assign => {
+                expression_to_lua(b.node.clone().lhs.node, state)
+                    + " = "
+                    + expression_to_lua(b.node.clone().rhs.node, state).as_str()
+            }
+            lang_c::ast::BinaryOperator::Index => {
+                "_memory[".to_string()
+                    + expression_to_lua(b.node.clone().lhs.node, state).as_str()
+                    + "+("
+                    + expression_to_lua(b.node.clone().rhs.node, state).as_str()
+                    + "-1)*_pointersize]" // sizeof *char == sizeof pointer
+            }
+            _ => {
+                "(".to_string()
+                    + expression_to_lua(b.node.clone().lhs.node, state).as_str()
+                    + " "
+                    + match b.node.clone().operator.node {
+                        lang_c::ast::BinaryOperator::LogicalAnd => "and",
+                        lang_c::ast::BinaryOperator::LogicalOr => "or",
+                        lang_c::ast::BinaryOperator::Less => "<",
+                        lang_c::ast::BinaryOperator::Greater => ">",
+                        lang_c::ast::BinaryOperator::LessOrEqual => "<=",
+                        lang_c::ast::BinaryOperator::GreaterOrEqual => ">=",
+                        lang_c::ast::BinaryOperator::Equals => "==",
+                        _ => {
+                            println!("unimpl {:?}", b.node.clone().operator.node);
+                            todo!()
+                        }
+                    }
+                    + " "
+                    + expression_to_lua(b.node.clone().rhs.node, state).as_str()
+                    + match b.node.clone().operator.node {
+                        lang_c::ast::BinaryOperator::Index => "]",
+                        _ => ")",
+                    }
+            }
+        },
+        Expression::Conditional(_) => todo!(),
+        Expression::Comma(_) => todo!(),
+        Expression::OffsetOf(_) => todo!(),
+        Expression::VaArg(_) => todo!(),
+        Expression::Statement(_) => todo!(),
+    }
+}
+fn statement_to_lua<'a>(stmt: Statement, state: &'a State) -> String {
+    match stmt {
+        Statement::Labeled(_) => todo!(),
+        Statement::Compound(vnbi) => {
+            // println!("compound statement {:?}", vnbi);
+            let mut st = State {
+                output: &mut "".to_string(),
+                src: &vnbi
+                    .iter()
+                    .map(|x| x.node.clone())
+                    .collect::<Vec<BlockItem>>(),
+                types: &mut state.types.clone(),
+                variables: &mut Vec::new(),
+                strtab: &state.strtab,
+            };
+            st.go(false).unwrap();
+            for bl in st.src.iter() {
+                match bl {
+                    BlockItem::Declaration(dec) => st
+                        .output
+                        .push_str((declaration_to_lua(dec.node.clone(), &st) + "\n").as_str()),
+                    BlockItem::StaticAssert(_) => todo!(),
+                    BlockItem::Statement(s) => st.output.push_str(
+                        (statement_to_lua(s.node.clone(), &st).to_string() + "\n").as_str(),
+                    ),
+                }
+            }
+            st.output.to_string()
+        }
+        Statement::Expression(exp) => {
+            if exp.is_some() {
+                expression_to_lua(exp.unwrap().node, state)
+            } else {
+                "".to_string()
+            }
+        }
+        Statement::If(i) => {
+            let mut out = "if ".to_string()
+                + expression_to_lua(i.node.clone().condition.node, state).as_str()
+                + " then"
+                + ("\n".to_string()
+                    + statement_to_lua(i.node.clone().then_statement.node, state)
+                        .split_terminator("\n")
+                        .map(|x| "   ".to_string() + x)
+                        .collect::<Vec<String>>()
+                        .join("\n")
+                        .as_str())
+                .as_str();
+            if i.node.else_statement.is_some() {
+                out = out
+                    + "\nelse"
+                    + ("\n".to_string()
+                        + statement_to_lua(i.node.clone().else_statement.unwrap().node, state)
+                            .split_terminator("\n")
+                            .map(|x| "   ".to_string() + x)
+                            .collect::<Vec<String>>()
+                            .join("\n")
+                            .as_str())
+                    .as_str()
+            }
+            out + "\nend"
+        }
+        Statement::Switch(_) => todo!(),
+        Statement::While(_) => todo!(),
+        Statement::DoWhile(_) => todo!(),
+        Statement::For(_) => todo!(),
+        Statement::Goto(_) => todo!(),
+        Statement::Continue => todo!(),
+        Statement::Break => todo!(),
+        Statement::Return(val) => {
+            // println!("return statement {:?}", val);
+            "return ".to_string()
+                + val
+                    .and_then(|x| Some(expression_to_lua(x.node, state)))
+                    .unwrap_or("".to_string())
+                    .as_str()
+        }
+        Statement::Asm(_) => todo!(),
+    }
+}
+impl Into<Type> for TS18661FloatType {
+    fn into(self) -> Type {
+        // ummm
+        match self.format {
+            lang_c::ast::TS18661FloatFormat::BinaryInterchange => todo!(),
+            lang_c::ast::TS18661FloatFormat::BinaryExtended => todo!(),
+            lang_c::ast::TS18661FloatFormat::DecimalInterchange => todo!(),
+            lang_c::ast::TS18661FloatFormat::DecimalExtended => todo!(),
+        }
+    }
+}
+impl TryStateInto<Type> for TypeSpecifier {
+    type Error = ();
+    fn try_state_into(self, state: &State) -> std::result::Result<Type, ()> {
+        match self {
+            TypeSpecifier::Void => Ok(Type::Void),
+            TypeSpecifier::Char => Ok(Type::Char(false)),
+            TypeSpecifier::Int => Ok(Type::Int(false)),
+            TypeSpecifier::Short => Ok(Type::Short(false)),
+            TypeSpecifier::Long => Ok(Type::Long(false)),
+            TypeSpecifier::Float => Ok(Type::Float),
+            TypeSpecifier::Double => Ok(Type::Double),
+            TypeSpecifier::Signed => Ok(Type::Int(false)),
+            TypeSpecifier::Unsigned => Ok(Type::Int(true)),
+            TypeSpecifier::Bool => Ok(Type::Bool),
+            TypeSpecifier::TS18661Float(a) => Ok(a.into()),
+            TypeSpecifier::TypedefName(id) => {
+                // println!("looking for alias source for {}", id.node.name);
+                Ok(state
+                    .types
+                    .iter()
+                    // .inspect(|x| {
+                    //     println!("type name {:?} == {} ?", get_type_name!(x), id.node.name)
+                    // })
+                    .find(|x| get_type_name!(x) == id.node.name)
+                    .expect("type alias source should be defined")
+                    .to_owned()
+                    .clone())
+            }
+            _ => {
+                println!("failure to convert typespecifier to type: {:?}", self);
+                Err(())
+            }
+        }
+    }
+}
+impl StateInto<Type> for ParameterDeclaration {
+    fn state_into(self, state: &State) -> Type {
+        match self.specifiers.first().unwrap().node.clone() {
+            DeclarationSpecifier::TypeSpecifier(t) => t.node.try_state_into(state).unwrap(),
+            _ => todo!(),
+        }
+        // todo!()
+    }
+}
+impl StateInto<Type> for FunctionDefinition {
+    fn state_into(self, state: &State) -> Type {
+        let ff = self
+            .declarator
+            .node
+            .derived
+            .iter()
+            .find_map(|x| match x.node.clone() {
+                lang_c::ast::DerivedDeclarator::Function(f) => Some(f),
+                lang_c::ast::DerivedDeclarator::KRFunction(_) => todo!("k&r style functions"),
+                _ => None,
+            })
+            .unwrap();
+        Type::Function((
+            {
+                match self.declarator.node.kind.node {
+                    DeclaratorKind::Identifier(i) => i.node.name,
+                    _ => "".to_string(),
+                }
+            },
+            Function {
+                return_type: Box::new(
+                    {
+                        let mut temp: Option<Type> = None;
+                        for t in self.specifiers.iter() {
+                            match t.node.clone() {
+                                DeclarationSpecifier::TypeSpecifier(ts) => match ts.node {
+                                    TypeSpecifier::Complex => {}
+                                    TypeSpecifier::Atomic(_) => {}
+                                    TypeSpecifier::Struct(_) => {}
+                                    TypeSpecifier::Enum(_) => {}
+                                    TypeSpecifier::TypedefName(id) => {
+                                        temp = Some(
+                                            state
+                                                .types
+                                                .iter()
+                                                .find(|x| get_type_name!(x) == id.node.name)
+                                                .expect("type used to be defined")
+                                                .to_owned()
+                                                .clone(),
+                                        );
+                                    }
+                                    TypeSpecifier::TypeOf(_) => {}
+                                    _ => temp = Some(ts.node.try_state_into(state).unwrap()),
+                                },
+                                DeclarationSpecifier::TypeQualifier(_) => todo!(),
+                                DeclarationSpecifier::StorageClass(_) => todo!(),
+                                DeclarationSpecifier::Function(_) => todo!(),
+                                DeclarationSpecifier::Alignment(_) => todo!(),
+                                DeclarationSpecifier::Extension(_) => todo!(),
+                            }
+                        }
+                        if temp.is_none() {
+                            Err(())
+                        } else {
+                            Ok(temp.unwrap())
+                        }
+                    }
+                    .unwrap(),
+                ),
+                arguments: {
+                    ff.node
+                        .parameters
+                        .iter()
+                        .map(|x| x.node.clone().state_into(state))
+                        .zip(ff.node.parameters.iter().filter_map(|x| {
+                            x.node
+                                .declarator
+                                .clone()
+                                .and_then(|y| match y.node.kind.node {
+                                    DeclaratorKind::Identifier(id) => Some(id.node.name),
+                                    _ => None,
+                                })
+                                .or(Some("".to_string()))
+                        }))
+                        .map(|x| (x.1, x.0))
+                        .collect::<Vec<(String, Type)>>()
+                },
+            },
+        ))
+    }
+}
+impl StateInto<Type> for Declaration {
+    fn state_into(self, state: &State) -> Type {
+        // println!("declarators {:?}", self.declarators);
+        // println!("specifiers {:?}", self.specifiers);
+        if self
+            .specifiers
+            .iter()
+            .find(|x| match x.node.clone() {
+                DeclarationSpecifier::StorageClass(s) => match s.node {
+                    lang_c::ast::StorageClassSpecifier::Extern => true,
+                    _ => false,
+                },
+                _ => false,
+            })
+            .is_some()
+        {
+            // extern
+            // for ele in self.declarators.iter() {
+            // }
+            self.specifiers
+                .iter()
+                .filter_map(|x| match x.node.clone() {
+                    DeclarationSpecifier::TypeSpecifier(ts) => Some(ts.node),
+                    _ => None,
+                })
+                .take(1)
+                .collect::<Vec<TypeSpecifier>>()
+                .first()
+                .unwrap()
+                .clone()
+                .try_state_into(state)
+                .unwrap()
+        } else {
+            // local
+            self.specifiers
+                .iter()
+                .filter_map(|x| match x.node.clone() {
+                    DeclarationSpecifier::TypeSpecifier(ts) => Some(ts.node),
+                    _ => None,
+                })
+                .take(1)
+                .collect::<Vec<TypeSpecifier>>()
+                .first()
+                .unwrap()
+                .clone()
+                .try_state_into(state)
+                .unwrap()
+        }
+    }
+}
+fn extdec_into_blockitem(ex: ExternalDeclaration) -> BlockItem {
+    match ex {
+        ExternalDeclaration::Declaration(d) => BlockItem::Declaration(d),
+        ExternalDeclaration::StaticAssert(s) => BlockItem::StaticAssert(s),
+        ExternalDeclaration::FunctionDefinition(f) => BlockItem::Statement(f.node.statement),
+    }
+}
+impl TryStateInto<Type> for BlockItem {
+    type Error = ();
+    fn try_state_into(self, state: &State) -> std::result::Result<Type, ()> {
+        match self {
+            BlockItem::Declaration(d) => Ok(d.node.state_into(state)),
+            _ => Err(()),
+        }
+    }
+}
+fn type_into_comment(x: Type, ret: bool) -> String {
+    let snip = match x {
+        Type::Void => "Void",
+        Type::Char(unsigned) => {
+            if unsigned {
+                "UChar"
+            } else {
+                "Char"
+            }
+        }
+        Type::Int(unsigned) => {
+            if unsigned {
+                "UInt"
+            } else {
+                "Int"
+            }
+        }
+        Type::Short(unsigned) => {
+            if unsigned {
+                "UShort"
+            } else {
+                "Short"
+            }
+        }
+        Type::Long(unsigned) => {
+            if unsigned {
+                "ULong"
+            } else {
+                "Long"
+            }
+        }
+        Type::Float => "Float",
+        Type::Double => "Double",
+        Type::Bool => "Bool",
+        _ => todo!(),
+    };
+    if (ret) {
+        "--> ".to_string() + snip
+    } else {
+        "--[[".to_string() + snip + "]]"
+    }
+}
+impl State<'_> {
+    fn go(&mut self, root: bool) -> Result<()> {
+        // language server protocol
+        let it = self
+            .src
+            .iter()
+            .filter_map(|x| x.clone().try_state_into(&self).ok())
+            .map(|x| x.borrow().clone())
+            .collect::<Vec<Type>>();
+        self.types.extend(it);
+        Ok(())
+    }
+}
+fn typetostring(x: Type) -> String {
+    match x {
+        Type::Void => "void".to_string(),
+        Type::Char(us) => if us { "unsigned char" } else { "char" }.to_string(),
+        Type::Int(us) => if us { "unsigned int" } else { "int" }.to_string(),
+        Type::Short(us) => if us {
+            "unsigned short int"
+        } else {
+            "short int"
+        }
+        .to_string(),
+        Type::Long(us) => if us { "unsigned long int" } else { "long int" }.to_string(),
+        Type::Float => "float".to_string(),
+        Type::Double => "double".to_string(),
+        Type::Bool => "boolean".to_string(),
+        _ => todo!(), // Type::Alias(_) => todo!(),
+                      // Type::Array(_) => todo!(),
+                      // Type::Enum(_) => todo!(),
+                      // Type::Struct(_) => todo!(),
+                      // Type::Function(_) => todo!(),
+    }
+}
+fn tu_to_lua(tu: TranslationUnit) -> String {
+    const BUILTINS: [(&str, Type); 9] = [
+        ("__builtin_va_list", Type::Char(false)),
+        ("__int8_t", Type::Char(true)),
+        ("__uint8_t", Type::Char(false)),
+        ("__int16_t", Type::Short(true)),
+        ("__uint16_t", Type::Short(false)),
+        ("__int32_t", Type::Int(true)),
+        ("__uint32_t", Type::Int(false)),
+        ("__int64_t", Type::Long(true)),
+        ("__uint64_t", Type::Long(false)),
+    ];
+    let mut state = State {
+        output: &mut "".to_string(),
+        src: &mut tu
+            .0
+            .iter()
+            .map(|x| extdec_into_blockitem(x.node.clone()))
+            .collect::<Vec<BlockItem>>(),
+        types: &mut Vec::new(),
+        variables: &mut Vec::new(),
+        strtab: &Mutex::new(Vec::new()), // parent: None,
+    };
+    for pair in BUILTINS.iter() {
+        state
+            .types
+            .push(Type::Alias((pair.0.to_string(), Box::new(pair.1.clone()))))
+    }
+    state.go(true).unwrap();
+    let ntl = state.types.len() - BUILTINS.len();
+    let vln = state.variables.len();
+    state.output.push_str(
+        format!(
+            "-- contains {} type{}, {} global variable{}\n",
+            ntl,
+            if ntl != 1 { "s" } else { "" },
+            vln,
+            if vln != 1 { "s" } else { "" }
+        )
+        .as_str(),
+    );
+    state
+        .output
+        .push_str("local _namespace,_exports,_imports,_memory,_strtab = {},{},{},{},nil;\n");
+    state.output.push_str("-- _imports['sizeof'] = {type='function',parameters={'*char[]'},variadic=false,return_='size_t',size=1}\n");
+    for extdecl in tu.0.iter() {
+        match extdecl.node.clone() {
+            ExternalDeclaration::Declaration(dec) => {
+                for decl in dec.node.declarators {
+                    state.output.push_str(
+                        (declarator_to_lua(decl.node.declarator.node, &state) + "\n").as_str(),
+                    );
+                }
+            }
+            ExternalDeclaration::FunctionDefinition(f2) => {
+                if let Type::Function((id, f)) = f2.node.clone().state_into(&state) {
+                    state.output.push_str(
+                        ("local function func_".to_string()
+                            + id.as_str()
+                            + "("
+                            + f.arguments
+                                .iter()
+                                .map(|x| {
+                                    (x.0.to_string()
+                                        + type_into_comment(x.1.clone(), false).as_str())
+                                })
+                                .collect::<Vec<String>>()
+                                .join(",")
+                                .as_str()
+                            + ") "
+                            + type_into_comment(*f.return_type.clone(), true).as_str()
+                            + ("\n".to_string()
+                                + "local _pointersize=_namespace['sizeof']('*char');\n"
+                                + statement_to_lua(f2.node.statement.node, &state).as_str())
+                            .split_terminator("\n")
+                            .map(|x| "   ".to_string() + x)
+                            .collect::<Vec<String>>()
+                            .join("\n")
+                            .as_str()
+                            + "\nend;\n"
+                            + "_namespace['"
+                            + id.as_str()
+                            + "'] = func_"
+                            + id.as_str()
+                            + ";\n_exports['"
+                            + id.as_str()
+                            + "'] = {type='function',parameters={"
+                            + f.arguments
+                                .iter()
+                                // .zip(f2.node.specifiers.iter())
+                                .map(|x| "'".to_string() + typetostring(x.1.clone()).as_str() + "'")
+                                .collect::<Vec<String>>()
+                                .join(",")
+                                .as_str()
+                            + "},return_='"
+                            + typetostring(*f.return_type).as_str()
+                            + "',size=1};\n")
+                            .as_str(),
+                    )
+                }
+            }
+            ExternalDeclaration::StaticAssert(_) => todo!(),
+        }
+    }
+    state.output.push_str("_strtab = {\n");
+    for str in state.strtab.lock().unwrap().iter() {
+        state
+            .output
+            .push_str(("   ".to_string() + str.0.as_str() + ";\n").as_str())
+    }
+    state.output.push_str("};\n");
+    state.output.push_str(
+        "return {namespace=_namespace,exports=_exports,imports=_imports,memory=_memory,set_memory=function(mem)_memory=mem;end,strtab=_strtab};\n",
+    );
+    return state.output.to_string();
+}
+fn main() {
     let arg = Args::parse();
-    let config = Config {
+    let config = lang_c::driver::Config {
         cpp_command: "clang".to_string(),
         cpp_options: {
             let mut v = Vec::new();
-            v.push("-nostdlib".to_string());
+            // v.push("-nostdlib".to_string());
             v.push("-E".to_string());
-            arg.define
-                .iter()
-                .map(|x| "-D".to_string() + &x)
-                .for_each(|x| v.push(x));
-            arg.include
-                .iter()
-                .map(|x| "-I".to_string() + &x)
-                .for_each(|x| v.push(x));
+            // arg.define
+            //     .iter()
+            //     .map(|x| "-D".to_string() + &x)
+            //     .for_each(|x| v.push(x));
             v
         },
         flavor: lang_c::driver::Flavor::ClangC11,
     };
-    if arg.l.len() > 0 || arg.input.len() > 1 {
-        // need to call the linker ...
-        match std::fs::create_dir("/tmp/lilac") {
-            Ok(_) => {}
-            Err(e) => {
-                if e.raw_os_error().is_some_and(|x| x != 17) {
-                    return Err(e);
-                }
-            }
-        }
-        for file in arg.input.iter() {
-            let path = file.path().as_os_str().to_str().unwrap();
-            if path.contains("/") {
-                std::fs::create_dir_all(
-                    "/tmp/lilac/".to_string()
-                        + &path
-                            .split("/")
-                            .take(path.split("/").count() - 1)
-                            .collect::<Vec<&str>>()
-                            .join("/"),
-                )
-                .unwrap();
-            }
-            let mut f = File::create("/tmp/lilac/".to_string() + path).expect("can open file");
-            write!(f, "{}", handle_file(path, &config).unwrap()).expect("writing okay");
-            let _ = f.set_modified(SystemTime::now());
-        }
-        let mut cmd = Command::new("tlld");
-        for arg2 in arg.linker.iter() {
-            cmd.arg("-".to_string() + &arg2);
-        }
-        for file in arg.input.iter() {
-            cmd.arg("/tmp/lilac/".to_string() + file.path().as_os_str().to_str().unwrap());
-        }
-        if arg.output.is_local() {
-            cmd.arg("-o");
-            cmd.arg(arg.output.path().as_os_str());
-        }
-        cmd.spawn().unwrap();
-        // print!(
-        //     "{}",
-        //     Into::<OsStr>::into(cmd.output().unwrap().stdout)
-        //         .into_string()
-        //         .unwrap()
-        // );
-    } else {
-        let output = handle_file(
-            arg.input
-                .get(0)
-                .unwrap()
-                .path()
-                .as_os_str()
-                .to_str()
-                .unwrap(),
-            &config,
-        )
-        .unwrap();
-        if arg.output.is_local() {
-            let mut f = File::create(arg.output.path().as_os_str().to_str().unwrap())
-                .expect("can open file");
-            write!(f, "{}", output).expect("writing okay");
-            let _ = f.set_modified(SystemTime::now());
-        } else {
-            print!("{}", output);
-        }
-    }
-    Ok(())
+    let ast = lang_c::driver::parse(&config, arg.input.path().path()).unwrap();
+    let mut outp = tu_to_lua(ast.unit).clone();
+    outp = format!(
+        "{}",
+        "-- file: ".to_string() + arg.input.path().to_string().as_str()
+    )
+    .to_string()
+        + "\n"
+        + outp.as_str();
+    println!("{}", outp);
 }
