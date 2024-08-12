@@ -1,4 +1,4 @@
-use std::{fs::File, io::Write, process::Command, time::SystemTime};
+use std::{fs::File, io::Write, os, process::Command, time::SystemTime};
 
 use lang_c::{
     ast::{
@@ -1412,9 +1412,43 @@ struct Args {
     warn: Vec<String>,
     #[clap(short = 'D')]
     define: Vec<String>,
+    #[clap(short = 'I', long = "include")]
+    include: Vec<String>,
+    #[clap(short = 'r', long = "linker-arg")]
+    linker: Vec<String>,
+    #[clap(short = 's', long = "std")]
+    std: Option<String>,
+}
+fn handle_file(file: &str, cfg: &Config) -> std::result::Result<String, ()> {
+    let mut s = "".to_string();
+    s = s
+        + "--FILE "
+        + file
+        + "\n---@diagnostic disable: lowercase-global\nlocal _D = (____C and ____C.env) or {};\n";
+    let result = parse(&cfg, file);
+    if result.is_err() {
+        print!("{}", result.err().unwrap());
+        return Err(());
+    }
+    for node in result.unwrap().unit.0.iter() {
+        s = s + &format!(
+            "{}\n",
+            // this doesn't work!!!
+            // I don't know why!!!
+            // it _should_ work, but it's not.
+            // and I can't really debug it any better.
+            node.into_lua()
+                .split("\n")
+                .filter(|&b| { !b.trim().is_empty() })
+                .collect::<Vec<&str>>()
+                .join("\n")
+        )
+    }
+    s = s + "return _D;";
+    Ok(s)
 }
 
-fn main() {
+fn main() -> std::result::Result<(), std::io::Error> {
     let arg = Args::parse();
     let config = Config {
         cpp_command: "clang".to_string(),
@@ -1426,18 +1460,52 @@ fn main() {
                 .iter()
                 .map(|x| "-D".to_string() + &x)
                 .for_each(|x| v.push(x));
+            arg.include
+                .iter()
+                .map(|x| "-I".to_string() + &x)
+                .for_each(|x| v.push(x));
             v
         },
         flavor: lang_c::driver::Flavor::ClangC11,
     };
-    if arg.l.iter().any(|x| x == "m") {
-        // "linker" mode
-        let mut cmd = Command::new("tlld");
-        for file in arg.input.iter() {
-            cmd.arg(file.path().as_os_str());
+    if arg.l.len() > 0 || arg.input.len() > 1 {
+        // need to call the linker ...
+        match std::fs::create_dir("/tmp/lilac") {
+            Ok(_) => {}
+            Err(e) => {
+                if e.raw_os_error().is_some_and(|x| x != 17) {
+                    return Err(e);
+                }
+            }
         }
-        cmd.arg("-o");
-        cmd.arg(arg.output.path().as_os_str());
+        for file in arg.input.iter() {
+            let path = file.path().as_os_str().to_str().unwrap();
+            if path.contains("/") {
+                std::fs::create_dir_all(
+                    "/tmp/lilac/".to_string()
+                        + &path
+                            .split("/")
+                            .take(path.split("/").count() - 1)
+                            .collect::<Vec<&str>>()
+                            .join("/"),
+                )
+                .unwrap();
+            }
+            let mut f = File::create("/tmp/lilac/".to_string() + path).expect("can open file");
+            write!(f, "{}", handle_file(path, &config).unwrap()).expect("writing okay");
+            let _ = f.set_modified(SystemTime::now());
+        }
+        let mut cmd = Command::new("tlld");
+        for arg2 in arg.linker.iter() {
+            cmd.arg("-".to_string() + &arg2);
+        }
+        for file in arg.input.iter() {
+            cmd.arg("/tmp/lilac/".to_string() + file.path().as_os_str().to_str().unwrap());
+        }
+        if arg.output.is_local() {
+            cmd.arg("-o");
+            cmd.arg(arg.output.path().as_os_str());
+        }
         cmd.spawn().unwrap();
         // print!(
         //     "{}",
@@ -1445,47 +1513,26 @@ fn main() {
         //         .into_string()
         //         .unwrap()
         // );
-        return;
-    }
-    let mut s = "".to_string();
-    let mut first = true;
-    for file in arg.input.iter() {
-        if first {
-            first = false;
-        } else {
-            s = s + "\n\n";
-        }
-        s = s
-            + "--FILE "
-            + file.path().to_str().unwrap()
-            + "\n---@diagnostic disable: lowercase-global\nlocal _D = (____C and ____C.env) or {};\n";
-        let result = parse(&config, file.path().to_str().unwrap());
-        if result.is_err() {
-            print!("{}", result.err().unwrap());
-            return;
-        }
-        for node in result.unwrap().unit.0.iter() {
-            s = s + &format!(
-                "{}\n",
-                // this doesn't work!!!
-                // I don't know why!!!
-                // it _should_ work, but it's not.
-                // and I can't really debug it any better.
-                node.into_lua()
-                    .split("\n")
-                    .filter(|&b| { !b.trim().is_empty() })
-                    .collect::<Vec<&str>>()
-                    .join("\n")
-            )
-        }
-        s = s + "return _D;"
-    }
-    let output = arg.output.path();
-    if arg.output.is_local() {
-        let mut f = File::create(output.path()).expect("can open file");
-        write!(f, "{}", s).expect("writing okay");
-        let _ = f.set_modified(SystemTime::now());
     } else {
-        print!("{}", s);
+        let output = handle_file(
+            arg.input
+                .get(0)
+                .unwrap()
+                .path()
+                .as_os_str()
+                .to_str()
+                .unwrap(),
+            &config,
+        )
+        .unwrap();
+        if arg.output.is_local() {
+            let mut f = File::create(arg.output.path().as_os_str().to_str().unwrap())
+                .expect("can open file");
+            write!(f, "{}", output).expect("writing okay");
+            let _ = f.set_modified(SystemTime::now());
+        } else {
+            print!("{}", output);
+        }
     }
+    Ok(())
 }
